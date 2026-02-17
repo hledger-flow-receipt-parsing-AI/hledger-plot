@@ -1,5 +1,6 @@
 """Entry point for the project."""
 
+import os
 from typing import Any, Dict
 
 from hledger_preprocessor.Currency import Currency
@@ -37,10 +38,15 @@ def main() -> None:
             args=args,
             plot_config=plot_config,
         )
-        launch_dash_dashboard(
-            args=args,
-            plot_config=plot_config,
-        )
+
+        # Support SKIP_DASH environment variable for testing
+        if os.environ.get("SKIP_DASH", "false").lower() != "true":
+            launch_dash_dashboard(
+                args=args,
+                plot_config=plot_config,
+            )
+        else:
+            print("SKIP_DASH=true: Skipping Dash dashboard launch")
 
 
 def export_plots_for_all_times(
