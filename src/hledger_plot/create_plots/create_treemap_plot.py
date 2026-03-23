@@ -107,6 +107,21 @@ def set_parent_to_child_sum(*, df: DataFrame) -> None:
                 )
 
 
+def _fix_parent_child_sums(*, df: DataFrame) -> None:
+    """Set each parent's 'value' to the sum of its children's 'value'.
+
+    Walks from the deepest level upward so that leaf values are authoritative
+    and every non-leaf equals the sum of its direct children.  This ensures
+    the ``branchvalues='total'`` invariant that Plotly treemaps require.
+    """
+    ordered = get_level_dict(df=df)
+    for level in sorted(ordered.keys(), reverse=True):
+        for entry in ordered[level]:
+            children = df.loc[df["parent"] == entry, "value"]
+            if not children.empty:
+                df.loc[df[0] == entry, "value"] = children.sum()
+
+
 def combined_treemap_plot(
     *,
     args: Namespace,
@@ -133,6 +148,10 @@ def combined_treemap_plot(
     check_negative_assets(
         df=filtered_df, identifier="assets", time_period=time_period
     )
+
+    # Recompute parent values as sum of children so the treemap
+    # branchvalues='total' invariant holds after abs()/int().
+    _fix_parent_child_sums(df=filtered_df)
 
     if args.randomize:
         scramble_sankey_data(

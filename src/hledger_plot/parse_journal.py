@@ -60,6 +60,7 @@ def read_balance_report(
         shlex.split(hledger_command),  # ← FIX
         stdout=subprocess.PIPE,
         text=True,
+        cwd="/",
     ).stdout
 
     # Read the process output into a DataFrame, and clean it up, removing

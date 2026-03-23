@@ -21,6 +21,7 @@ def list_journal_files(*, abs_journal_root_filepath: str) -> List[str]:
             capture_output=True,
             text=True,
             check=True,
+            cwd="/",
         )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"hledger command failed: {e.stderr.strip()}") from e

@@ -26,7 +26,8 @@ def get_years_and_months_from_hledger(*, filepath: str) -> Dict[int, Set[int]]:
 
     try:
         result = subprocess.run(
-            shlex.split(cmd), capture_output=True, text=True, check=True
+            shlex.split(cmd), capture_output=True, text=True, check=True,
+            cwd="/",
         )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"hledger command failed: {e.stderr.strip()}") from e
