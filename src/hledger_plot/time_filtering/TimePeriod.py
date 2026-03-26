@@ -38,6 +38,12 @@ class TimePeriod:
                 # everything to a single commodity, e.g. £,$, EUR etc.
             ]
         )
+        # Same flags but without --value=then,<currency> so hledger
+        # preserves multi-currency amounts per account.
+        self.raw_exotic_args: List[str] = [
+            " --tree --no-elide",
+            "--cost --infer-value",
+        ]
 
         if not all_time:
             if year is None:
@@ -66,12 +72,26 @@ class TimePeriod:
                             required_exotic_args=self.required_exotic_args,
                         )
                     )
+                    self.raw_hledger_command: str = (
+                        build_hledger_command_for_period(
+                            filename=filename,
+                            account_categories=account_categories,
+                            month=month,
+                            year=year,
+                            required_exotic_args=self.raw_exotic_args,
+                        )
+                    )
 
         else:
             self.hledger_command: str = build_hledger_command_all_time(
                 filename=filename,
                 account_categories=account_categories,
                 required_exotic_args=self.required_exotic_args,
+            )
+            self.raw_hledger_command: str = build_hledger_command_all_time(
+                filename=filename,
+                account_categories=account_categories,
+                required_exotic_args=self.raw_exotic_args,
             )
 
     def get_period(self) -> str:

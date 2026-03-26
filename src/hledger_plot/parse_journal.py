@@ -3,7 +3,7 @@ import shlex
 import subprocess  # nosec
 from argparse import Namespace
 from io import StringIO
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 from hledger_preprocessor.Currencies.fetch_rates import (
@@ -20,6 +20,127 @@ from hledger_plot.time_filtering.TimePeriod import (
     TimePeriod,
     build_hledger_command_from_earliest_to_period,
 )
+
+
+def _parse_currency_pairs(s: str) -> List[Tuple[str, float]]:
+    """Extract (currency, amount) pairs from a raw hledger amount string.
+
+    Example input: ``"EUR100.00, GBP50.00"`` → ``[("EUR", 100.0), ("GBP", 50.0)]``
+    """
+    s = re.sub(r"(\d),(\d)", r"\1.\2", s)
+    pairs = re.findall(
+        r"([A-Z]{2,})([\s-]*[-+]?\d+(?:\.\d+)?(?:,\d+)?)", s
+    )
+    result: List[Tuple[str, float]] = []
+    for curr, amt_str in pairs:
+        amt_str = amt_str.strip().replace(",", "")
+        try:
+            result.append((curr, float(amt_str)))
+        except ValueError:
+            pass
+    return result
+
+
+def _get_rates(disp_currency: str) -> Dict[str, float]:
+    """Load exchange rates, fetching missing ones if needed."""
+    rates = load_latest_rates(disp_currency)
+    all_currencies = {c.value for c in Currency}
+    missing = all_currencies - set(rates.keys())
+    if missing:
+        new_rates, _ = fetch_exchange_rates(base_currency=disp_currency)
+        rates.update(new_rates)
+    return rates
+
+
+def _run_hledger_to_df(
+    hledger_command: str, top_level_account_categories: List[str]
+) -> DataFrame:
+    """Run an hledger command and return a filtered two-column DataFrame."""
+    process_output = subprocess.run(
+        shlex.split(hledger_command),
+        stdout=subprocess.PIPE,
+        text=True,
+        cwd="/",
+    ).stdout
+    raw_df: DataFrame = pd.read_csv(StringIO(process_output), header=None)
+    return raw_df[
+        raw_df[0].str.contains("|".join(top_level_account_categories))
+    ].copy()
+
+
+def _expand_multicurrency_rows(
+    *,
+    raw_df: DataFrame,
+    valued_df: DataFrame,
+    disp_currency: str,
+    rates: Dict[str, float],
+) -> DataFrame:
+    """Split accounts that hold multiple currencies into virtual sub-accounts.
+
+    For each *leaf* account in *raw_df* whose balance contains 2+ distinct
+    currencies, replace the single aggregated row in *valued_df* with one row
+    per currency (e.g. ``wallet:physical`` → ``wallet:physical:EUR`` +
+    ``wallet:physical:GBP``).
+
+    Only leaf accounts are split — intermediate/parent accounts that show
+    multi-currency totals because of their children are left untouched.
+
+    Accounts that already have ``:CURRENCY`` sub-accounts in *valued_df* are
+    skipped to avoid duplication.
+    """
+    all_accounts = set(valued_df[0])
+
+    # Build a set of accounts that are parents of other accounts so we can
+    # restrict splitting to leaf accounts only.
+    parent_accounts: set = set()
+    for acct in all_accounts:
+        parts = acct.split(":")
+        for i in range(1, len(parts)):
+            parent_accounts.add(":".join(parts[:i]))
+
+    new_rows: List[Dict] = []
+    accounts_to_zero: List[str] = []
+
+    for _, row in raw_df.iterrows():
+        account: str = row[0]
+        pairs = _parse_currency_pairs(str(row[1]))
+
+        # Only split if the account holds 2+ distinct currencies.
+        distinct_currencies = {curr for curr, _ in pairs}
+        if len(distinct_currencies) < 2:
+            continue
+
+        # Only split leaf accounts — parents aggregate their children's
+        # currencies and should not be split themselves.
+        if account in parent_accounts:
+            continue
+
+        # Skip if the journal already uses :CURRENCY sub-accounts.
+        if any(f"{account}:{curr}" in all_accounts for curr in distinct_currencies):
+            continue
+
+        # Skip if this account isn't in valued_df (e.g. filtered out).
+        if account not in all_accounts:
+            continue
+
+        accounts_to_zero.append(account)
+        for curr, amount in pairs:
+            rate = rates.get(curr, 1.0)
+            converted = amount * rate if curr != disp_currency else amount
+            new_rows.append({0: f"{account}:{curr}", 1: converted})
+
+    if not new_rows:
+        return valued_df
+
+    result = valued_df.copy()
+    # Zero out the original rows — they become parent nodes whose value
+    # will be recomputed as the sum of their new currency children by
+    # _fix_parent_child_sums in the treemap / Sankey code.
+    result.loc[result[0].isin(accounts_to_zero), 1] = 0.0
+    # Append the per-currency rows.
+    new_df = pd.DataFrame(new_rows)
+    result = pd.concat([result, new_df], ignore_index=True)
+    return result
 
 
 @typechecked
@@ -47,8 +168,16 @@ def read_balance_report(
             years_and_months=time_period.years_and_months,
             required_exotic_args=time_period.required_exotic_args,
         )
+        raw_hledger_command: str = build_hledger_command_from_earliest_to_period(
+            filename=time_period.filename,
+            account_categories=time_period.account_categories,
+            time_period=time_period,
+            years_and_months=time_period.years_and_months,
+            required_exotic_args=time_period.raw_exotic_args,
+        )
     else:
         hledger_command: str = time_period.hledger_command
+        raw_hledger_command: str = time_period.raw_hledger_command
     print(f"hledger_command={hledger_command}")
 
     # Call hledger to compute balances.
@@ -56,62 +185,41 @@ def read_balance_report(
         print(f"Ignoring options:{optional_balance_args}\n")
         print(f"default_command=:{hledger_command}\n")
 
-    process_output = subprocess.run(
-        shlex.split(hledger_command),  # ← FIX
-        stdout=subprocess.PIPE,
-        text=True,
-        cwd="/",
-    ).stdout
+    # 1. Run the valued command (converts everything to display currency).
+    valued_df = _run_hledger_to_df(hledger_command, top_level_account_categories)
+    valued_df = process_df(df=valued_df, disp_currency=disp_currency)
 
-    # Read the process output into a DataFrame, and clean it up, removing
-    # headers.
-    raw_df: DataFrame = pd.read_csv(StringIO(process_output), header=None)
-    df: DataFrame = raw_df[
-        raw_df[0].str.contains("|".join(top_level_account_categories))
-    ]
+    # 2. Run the raw command (preserves multi-currency amounts).
+    raw_df = _run_hledger_to_df(raw_hledger_command, top_level_account_categories)
 
-    return process_df(df=df, disp_currency=disp_currency)
+    # 3. Split multi-currency accounts into virtual :CURRENCY sub-accounts.
+    rates = _get_rates(disp_currency)
+    valued_df = _expand_multicurrency_rows(
+        raw_df=raw_df,
+        valued_df=valued_df,
+        disp_currency=disp_currency,
+        rates=rates,
+    )
+
+    return valued_df
 
 
-# Your original code, enhanced
 def process_df(*, df, disp_currency):
-    # Fetch or load rates (first try load latest, if missing currencies, fetch new)
-    rates = load_latest_rates(disp_currency)
-    all_currencies = {c.value for c in Currency}  # Based on enums
-    missing = all_currencies - set(rates.keys())
-    if missing:
-        new_rates, _ = fetch_exchange_rates(base_currency=disp_currency)
-        rates.update(new_rates)
+    rates = _get_rates(disp_currency)
 
-    # Parse, convert, and sum function
     def parse_convert_and_sum(s, base_currency, rates):
-        # Normalize: replace commas in numbers, but keep for parsing
-        s = re.sub(r"(\d),(\d)", r"\1.\2", s)  # Comma to dot for decimals
-        # Find pairs: currency followed by optional space/sign and number (handles "POUND-165.93", "EUR 16001,25")
-        pairs = re.findall(r"([A-Z]{2,})([\s-]*[-+]?\d+(?:\.\d+)?(?:,\d+)?)", s)
+        pairs = _parse_currency_pairs(s)
         total = 0.0
-        for curr, amt_str in pairs:
-            # Clean amount
-            amt_str = amt_str.strip().replace(",", "")
-            try:
-                value = float(amt_str)
-                rate = rates.get(curr, 1.0)  # Default 1 if unknown
-                if curr != base_currency:
-                    value *= rate  # Convert to base
-                total += value
-            except ValueError:
-                pass
+        for curr, value in pairs:
+            rate = rates.get(curr, 1.0)
+            if curr != base_currency:
+                value *= rate
+            total += value
         return total
 
     # Apply to column: first convert to base, sum per row
     df[1] = df[1].apply(
         lambda s: parse_convert_and_sum(s, disp_currency, rates)
     )
-
-    # If needed, further conversions afterwards (e.g., to another currency, but here assuming done)
-    # Example: if you want to convert the summed total to another currency post-processing
-    # other_currency = 'USD'
-    # other_rate = fetch_rate(other_currency, disp_currency)  # Implement if needed
-    # df[1] = df[1] * other_rate
 
     return df
