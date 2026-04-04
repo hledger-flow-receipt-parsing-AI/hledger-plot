@@ -1,8 +1,10 @@
 # import plotly
 from __future__ import annotations
 
+import re
 from enum import Enum
 from pathlib import Path
+from typing import List
 
 from hledger_preprocessor.config.Config import Config
 from hledger_preprocessor.config.load_config import (
@@ -116,6 +118,36 @@ class PlotConfig:
                     journal_filepath=args.journal_filepath
                 )
             )
+
+            # Derive crypto account patterns from is_crypto accounts.
+            # Used to separate crypto plots from living-expense plots.
+            self.crypto_account_prefixes: List[str] = []
+            for ac in self.config.accounts:
+                if ac.is_crypto:
+                    a = ac.account
+                    bank = a.bank
+                    # Asset accounts: assets:<holder>:<bank>:<type>
+                    self.crypto_account_prefixes.append(
+                        f"assets:{a.account_holder}:{bank}:{a.account_type}"
+                    )
+                    # Expense/income sub-accounts related to this exchange
+                    self.crypto_account_prefixes.append(
+                        f"expenses:crypto:{bank}"
+                    )
+                    self.crypto_account_prefixes.append(
+                        f"expenses:fees:{bank}"
+                    )
+                    self.crypto_account_prefixes.append(
+                        f"income:crypto:{bank}"
+                    )
+            # Compiled regex: matches any account starting with a crypto prefix
+            if self.crypto_account_prefixes:
+                escaped = [re.escape(p) for p in self.crypto_account_prefixes]
+                self.crypto_pattern: re.Pattern | None = re.compile(
+                    "^(" + "|".join(escaped) + ")"
+                )
+            else:
+                self.crypto_pattern = None
 
         else:
             raise ValueError(

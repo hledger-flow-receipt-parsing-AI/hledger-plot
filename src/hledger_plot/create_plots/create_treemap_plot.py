@@ -130,6 +130,7 @@ def combined_treemap_plot(
     title: str,
     plot_config: PlotConfig,
     time_period: TimePeriod,
+    skip_negative_check: bool = False,
 ) -> Figure:
     # Filter the DataFrame for the specified categories
     filtered_df = balances_df[
@@ -145,9 +146,10 @@ def combined_treemap_plot(
     filtered_df.loc[:, "value"] = abs(filtered_df[1].astype(int))
     filtered_df.loc[:, "parent"] = filtered_df["name"].apply(get_parent)
 
-    check_negative_assets(
-        df=filtered_df, identifier="assets", time_period=time_period
-    )
+    if not skip_negative_check:
+        check_negative_assets(
+            df=filtered_df, identifier="assets", time_period=time_period
+        )
 
     # Recompute parent values as sum of children so the treemap
     # branchvalues='total' invariant holds after abs()/int().
