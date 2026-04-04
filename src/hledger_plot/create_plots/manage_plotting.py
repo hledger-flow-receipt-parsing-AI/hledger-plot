@@ -1,7 +1,8 @@
 import copy
+import re
 from argparse import Namespace
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
 from pandas.core.frame import DataFrame
@@ -15,12 +16,45 @@ from hledger_plot.create_plots.create_sankey_plot import (
 )
 from hledger_plot.create_plots.create_treemap_plot import combined_treemap_plot
 from hledger_plot.create_plots.labels_with_values import format_treemap_labels
-from hledger_plot.create_plots.Plots import ExtendedPlots, Plots
+from hledger_plot.create_plots.Plots import CryptoPlots, ExtendedPlots, Plots
 from hledger_plot.PlotConfig import PlotConfig
 from hledger_plot.time_filtering.add_dropdown import add_dropdown
 from hledger_plot.time_filtering.TimePeriod import TimePeriod
 
 # from plotly.graph_objs._figure import Figure
+
+
+def _filter_out_crypto(
+    df: DataFrame, crypto_pattern: Optional[re.Pattern],
+) -> DataFrame:
+    """Return a copy of df with rows matching crypto accounts removed."""
+    if crypto_pattern is None:
+        return df
+    mask = df[0].str.match(crypto_pattern)
+    return df[~mask].copy()
+
+
+def _filter_to_crypto(
+    df: DataFrame, crypto_pattern: Optional[re.Pattern],
+) -> DataFrame:
+    """Return a copy of df with only crypto rows and their ancestors."""
+    if crypto_pattern is None:
+        return df.iloc[0:0].copy()  # empty DataFrame
+
+    # Keep rows that directly match crypto patterns
+    is_crypto = df[0].str.match(crypto_pattern)
+
+    # Also keep ancestor rows (e.g. "expenses" is ancestor of
+    # "expenses:crypto:kraken"). An account name is an ancestor if
+    # any crypto-matching account starts with it followed by ":".
+    crypto_names = set(df.loc[is_crypto, 0])
+    ancestor_mask = df[0].apply(
+        lambda name: any(
+            cn.startswith(name + ":") for cn in crypto_names
+        )
+    )
+
+    return df[is_crypto | ancestor_mask].copy()
 
 
 @typechecked
@@ -33,12 +67,21 @@ def create_plot_objects(
     net_worth_df: DataFrame,
     time_period: TimePeriod,
 ) -> ExtendedPlots:
+    crypto_pat = plot_config.crypto_pattern
+
+    # For living (non-crypto) plots, filter out crypto accounts.
+    living_net_worth_df = _filter_out_crypto(net_worth_df, crypto_pat)
+    living_all_balances_df = _filter_out_crypto(all_balances_df, crypto_pat)
+    living_income_expenses_df = _filter_out_crypto(
+        income_expenses_df, crypto_pat
+    )
+
     net_worth_treemap: Figure = combined_treemap_plot(
         args=args,
-        balances_df=net_worth_df,
+        balances_df=living_net_worth_df,
         account_categories=[
-            plot_config.hledgerCategories.liability_categories,  # liabliities are shown but not scrambled.
-            plot_config.hledgerCategories.asset_categories,  # Assets are not shown but are scrambled.
+            plot_config.hledgerCategories.liability_categories,
+            plot_config.hledgerCategories.asset_categories,
         ],
         plot_config=plot_config,
         title="Treemap - Your financial state/position:",
@@ -47,7 +90,7 @@ def create_plot_objects(
 
     net_worth_sankey: pd.DataFrame = to_sankey_df(
         args=args,
-        df=all_balances_df,
+        df=living_all_balances_df,
         desired_left_top_level_categories=[
             plot_config.hledgerCategories.liability_categories
         ],
@@ -66,7 +109,7 @@ def create_plot_objects(
     # Create the income vs expense Sankey plot.
     income_vs_expenses_sankey_df: pd.DataFrame = to_sankey_df(
         args=args,
-        df=income_expenses_df,
+        df=living_income_expenses_df,
         desired_left_top_level_categories=[
             plot_config.hledgerCategories.income_categories
         ],
@@ -86,7 +129,7 @@ def create_plot_objects(
     # Generate the Treemap plot for the expenses.
     income_vs_expenses_treemap: Figure = combined_treemap_plot(
         args=args,
-        balances_df=income_expenses_df,
+        balances_df=living_income_expenses_df,
         account_categories=[
             plot_config.hledgerCategories.income_categories,
             plot_config.hledgerCategories.expense_categories,
@@ -100,7 +143,7 @@ def create_plot_objects(
 
     expenses_treemap: Figure = combined_treemap_plot(
         args=args,
-        balances_df=income_expenses_df,
+        balances_df=living_income_expenses_df,
         account_categories=[plot_config.hledgerCategories.expense_categories],
         title="Treemap - Overview of your expenses:",
         time_period=time_period,
@@ -108,12 +151,69 @@ def create_plot_objects(
     )
     income_treemap: Figure = combined_treemap_plot(
         args=args,
-        balances_df=income_expenses_df,
+        balances_df=living_income_expenses_df,
         account_categories=[plot_config.hledgerCategories.income_categories],
         title="Treemap - Overview of your income:",
         plot_config=plot_config,
         time_period=time_period,
     )
+
+    # Generate crypto-only plots if crypto accounts are configured.
+    crypto_plots: Optional[CryptoPlots] = None
+    if crypto_pat is not None:
+        crypto_net_worth_df = _filter_to_crypto(net_worth_df, crypto_pat)
+        crypto_income_expenses_df = _filter_to_crypto(
+            income_expenses_df, crypto_pat
+        )
+
+        # Only create crypto plots if there's data.
+        has_crypto_assets = crypto_net_worth_df[
+            crypto_net_worth_df[0].str.startswith("assets")
+        ].shape[0] > 0
+        has_crypto_expenses = crypto_income_expenses_df[
+            crypto_income_expenses_df[0].str.startswith("expenses")
+        ].shape[0] > 0
+
+        if has_crypto_assets or has_crypto_expenses:
+            crypto_expenses_treemap: Figure = combined_treemap_plot(
+                args=args,
+                balances_df=crypto_income_expenses_df,
+                account_categories=[
+                    plot_config.hledgerCategories.expense_categories,
+                ],
+                title="Treemap - Crypto expenses:",
+                time_period=time_period,
+                plot_config=plot_config,
+                skip_negative_check=True,
+            )
+            crypto_income_treemap: Figure = combined_treemap_plot(
+                args=args,
+                balances_df=crypto_income_expenses_df,
+                account_categories=[
+                    plot_config.hledgerCategories.income_categories,
+                ],
+                title="Treemap - Crypto income:",
+                plot_config=plot_config,
+                time_period=time_period,
+                skip_negative_check=True,
+            )
+            crypto_net_worth_treemap: Figure = combined_treemap_plot(
+                args=args,
+                balances_df=crypto_net_worth_df,
+                account_categories=[
+                    plot_config.hledgerCategories.asset_categories,
+                ],
+                title="Treemap - Crypto net worth:",
+                plot_config=plot_config,
+                time_period=time_period,
+                skip_negative_check=True,
+            )
+            crypto_plots = CryptoPlots(
+                crypto_expenses_treemap=crypto_expenses_treemap,
+                crypto_income_treemap=crypto_income_treemap,
+                crypto_net_worth_treemap=crypto_net_worth_treemap,
+            )
+
     extended_plots: ExtendedPlots = ExtendedPlots(
         net_worth_treemap=net_worth_treemap,
         plots=Plots(
@@ -123,6 +223,7 @@ def create_plot_objects(
             all_balances_sankey_man_pos=all_balances_sankey_man_pos,
             income_expenses_sankey_man_pos=income_expenses_sankey_man_pos,
         ),
+        crypto_plots=crypto_plots,
     )
     return extended_plots
 
@@ -182,6 +283,12 @@ def export_plots(
         "expenses_treemap",
         "net_worth_treemap",
     ]
+    if extended_plots.crypto_plots:
+        subfolders.extend([
+            "crypto_expenses_treemap",
+            "crypto_income_treemap",
+            "crypto_net_worth_treemap",
+        ])
 
     # ------------------------------------------------------------------- #
     # 4.3  Create the whole tree *once* (only if we actually export)
@@ -235,6 +342,28 @@ def export_plots(
                     period=period_str,
                 ),
             )
+
+        # Export crypto treemaps
+        if extended_plots.crypto_plots:
+            crypto_export_map = {
+                "crypto_expenses_treemap": "crypto_expenses_treemap",
+                "crypto_income_treemap": "crypto_income_treemap",
+                "crypto_net_worth_treemap": "crypto_net_worth_treemap",
+            }
+            for attr, sub in crypto_export_map.items():
+                fig = getattr(extended_plots.crypto_plots, attr)
+                fig = format_treemap_labels(
+                    fig=fig, disp_currency=plot_config.disp_currency
+                )
+                export_treemap_to_svg(
+                    plot_config=plot_config,
+                    fig=fig,
+                    filepath=plot_path(
+                        base_dir=plot_config.base_path,
+                        sub_dir=sub,
+                        period=period_str,
+                    ),
+                )
 
 
 # --------------------------------------------------------------------------- #

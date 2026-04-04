@@ -1,6 +1,8 @@
 # import plotly
 from __future__ import annotations
 
+from typing import Optional
+
 from plotly.graph_objs._figure import Figure
 
 
@@ -20,17 +22,40 @@ class Plots:
         self.income_expenses_sankey_man_pos = income_expenses_sankey_man_pos
 
 
+class CryptoPlots:
+    """Crypto-only plot set (expenses, income, net-worth treemaps)."""
+
+    def __init__(
+        self,
+        crypto_expenses_treemap: Figure,
+        crypto_income_treemap: Figure,
+        crypto_net_worth_treemap: Figure,
+    ):
+        self.crypto_expenses_treemap = crypto_expenses_treemap
+        self.crypto_income_treemap = crypto_income_treemap
+        self.crypto_net_worth_treemap = crypto_net_worth_treemap
+
+    def get_plots_as_list(self) -> list[Figure]:
+        return [
+            self.crypto_expenses_treemap,
+            self.crypto_income_treemap,
+            self.crypto_net_worth_treemap,
+        ]
+
+
 class ExtendedPlots:
     def __init__(
         self,
         plots: Plots,
         net_worth_treemap: Figure,
+        crypto_plots: Optional[CryptoPlots] = None,
     ):
         self.plots: Plots = plots
         self.net_worth_treemap: Figure = net_worth_treemap
+        self.crypto_plots: Optional[CryptoPlots] = crypto_plots
 
     def get_plots_as_list(self) -> list[Figure]:
-        return [
+        figs = [
             self.plots.income_vs_expenses_treemap,
             self.plots.expenses_treemap,
             self.plots.income_treemap,
@@ -38,3 +63,6 @@ class ExtendedPlots:
             self.plots.income_expenses_sankey_man_pos,
             self.net_worth_treemap,
         ]
+        if self.crypto_plots:
+            figs.extend(self.crypto_plots.get_plots_as_list())
+        return figs
