@@ -108,3 +108,7 @@ def export_plots_for_all_times(
                     time_period=time_period,
                     # config=plot_config.config,
                 )
+
+
+if __name__ == "__main__":
+    main()
