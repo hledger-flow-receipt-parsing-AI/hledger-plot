@@ -166,13 +166,25 @@ def create_category_timeseries(
         )
     )
 
-    # X-axis: show dates as tick labels.
+    # X-axis: show dates as tick labels (max 30 to stay readable).
+    max_ticks = 30
+    all_indices = list(df.index)
+    all_labels = df["date"].dt.strftime("%Y-%m-%d").tolist()
+    if len(all_indices) > max_ticks:
+        step = len(all_indices) / max_ticks
+        pick = [int(i * step) for i in range(max_ticks)]
+        tick_vals = [all_indices[i] for i in pick]
+        tick_text = [all_labels[i] for i in pick]
+    else:
+        tick_vals = all_indices
+        tick_text = all_labels
+
     fig.update_layout(
         title=f"Transactions for: {account_prefix}",
         xaxis=dict(
             tickmode="array",
-            tickvals=list(df.index),
-            ticktext=df["date"].dt.strftime("%Y-%m-%d").tolist(),
+            tickvals=tick_vals,
+            ticktext=tick_text,
             tickangle=-45,
         ),
         yaxis=dict(

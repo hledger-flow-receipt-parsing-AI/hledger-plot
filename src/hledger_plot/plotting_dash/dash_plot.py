@@ -146,43 +146,12 @@ def launch_dash_dashboard(
                     "margin": "10px 20px",
                 },
             ),
-            # Overview plots (rendered dynamically, same as original).
+            # All plots live here — overview OR drill-down (swapped in-place).
             html.Div(id="plots-container", style={"marginTop": "20px"}),
-            # Drill-down section (hidden until activated).
-            html.Hr(
-                id="drilldown-hr",
-                style={"display": "none", "margin": "20px"},
-            ),
-            html.Div(
-                id="drilldown-bar",
-                style={
-                    "display": "none",
-                    "alignItems": "center",
-                    "margin": "0 20px",
-                },
-                children=[
-                    html.Button(
-                        "Back to Overview",
-                        id="back-btn",
-                        n_clicks=0,
-                        style=_btn_inactive,
-                    ),
-                    html.Span(
-                        id="drilldown-label",
-                        style={
-                            "marginLeft": "12px",
-                            "fontSize": "16px",
-                            "fontWeight": "bold",
-                        },
-                    ),
-                ],
-            ),
-            dcc.Graph(
-                id="drilldown-graph",
-                style={"display": "none"},
-            ),
             # Hidden store: tracks whether drill-down mode is on.
             dcc.Store(id="drilldown-mode-store", data=json.dumps(False)),
+            # Hidden store: caches the last overview HTML so we can restore it.
+            dcc.Store(id="overview-cache", data=""),
         ]
     )
 
@@ -191,6 +160,7 @@ def launch_dash_dashboard(
     # --------------------------------------------------------------
     @app.callback(
         Output("plots-container", "children"),
+        Output("overview-cache", "data"),
         Input("period-dropdown", "value"),
     )
     def _update_dashboard(selected_period: str):
@@ -225,7 +195,9 @@ def launch_dash_dashboard(
             time_period=time_period,
         )
         # ---- stitch the figures together with correct heights ----
-        return _render_combined(extended_plots=extended_plots)
+        children = _render_combined(extended_plots=extended_plots)
+        # Cache a marker so we know to re-render on "Back".
+        return children, selected_period
 
     # --------------------------------------------------------------
     # 5. Toggle drill-down mode on/off
@@ -254,14 +226,11 @@ def launch_dash_dashboard(
         )
 
     # --------------------------------------------------------------
-    # 6. Drill-down: treemap clickData (while mode is on) or Back btn
+    # 6. Drill-down: treemap clickData (mode on) or Back btn
+    #    Swaps plots-container between overview and drill-down.
     # --------------------------------------------------------------
     @app.callback(
-        Output("drilldown-graph", "figure"),
-        Output("drilldown-graph", "style"),
-        Output("drilldown-label", "children"),
-        Output("drilldown-bar", "style"),
-        Output("drilldown-hr", "style"),
+        Output("plots-container", "children", allow_duplicate=True),
         # Reset mode after drill-down.
         Output("drilldown-mode-store", "data", allow_duplicate=True),
         Output("drilldown-mode-btn", "style", allow_duplicate=True),
@@ -269,35 +238,64 @@ def launch_dash_dashboard(
         Input("back-btn", "n_clicks"),
         Input({"type": "treemap-graph", "index": ALL}, "clickData"),
         State("drilldown-mode-store", "data"),
+        State("overview-cache", "data"),
+        State("period-dropdown", "value"),
         prevent_initial_call=True,
     )
-    def _handle_drilldown(back_clicks, all_click_data, mode_json):
+    def _handle_drilldown(
+        back_clicks, all_click_data, mode_json, cached_period, current_period
+    ):
         ctx = callback_context
         if not ctx.triggered:
             raise PreventUpdate
 
         trigger_id = ctx.triggered[0]["prop_id"]
-        hide_outputs = (
-            {"data": [], "layout": {}},
-            {"display": "none"},
-            "",
-            {"display": "none"},
-            {"display": "none"},
+        mode_off_outputs = (
             json.dumps(False),
             {**_btn_inactive, "marginLeft": "20px"},
             "",
         )
 
-        # Back button.
+        # Back button -> re-render overview from current period.
         if "back-btn" in trigger_id:
-            return hide_outputs
+            period = current_period or "all_time"
+            if period == "all_time":
+                time_period = TimePeriod(
+                    filename=args.journal_filepath,
+                    account_categories=" ".join(
+                        plot_config.top_level_account_categories
+                    ),
+                    disp_currency=Currency(args.display_currency),
+                    month=None,
+                    year=None,
+                    all_time=True,
+                )
+            else:
+                month, year = _parse_period(period)
+                time_period = TimePeriod(
+                    filename=args.journal_filepath,
+                    account_categories=" ".join(
+                        plot_config.top_level_account_categories
+                    ),
+                    disp_currency=Currency(args.display_currency),
+                    month=month,
+                    year=year,
+                    all_time=False,
+                )
+            extended_plots: ExtendedPlots = run_pipeline(
+                args=args,
+                plot_config=plot_config,
+                time_period=time_period,
+            )
+            overview = _render_combined(extended_plots=extended_plots)
+            return (overview, *mode_off_outputs)
 
         # A treemap was clicked — only act if drill-down mode is on.
         mode_on = json.loads(mode_json)
         if not mode_on:
             raise PreventUpdate
 
-        # Find which graph actually triggered (use ctx.triggered_id).
+        # Find which graph actually triggered.
         label = None
         triggered_id = ctx.triggered_id
         if isinstance(triggered_id, dict) and triggered_id.get("type") == "treemap-graph":
@@ -316,21 +314,44 @@ def launch_dash_dashboard(
             display_currency=args.display_currency,
         )
 
-        return (
-            fig,
-            {"width": "100%", "height": "600px", "margin": "0 20px"},
-            f"Drill-down: {label}",
-            {
-                "display": "flex",
-                "alignItems": "center",
-                "margin": "0 20px",
-            },
-            {"margin": "20px"},
-            # Reset mode to off after drill-down.
-            json.dumps(False),
-            {**_btn_inactive, "marginLeft": "20px"},
-            "",
+        # Replace plots-container with drill-down view.
+        drilldown_view = html.Div(
+            [
+                html.Div(
+                    [
+                        html.Button(
+                            "Back to Overview",
+                            id="back-btn",
+                            n_clicks=0,
+                            style=_btn_inactive,
+                        ),
+                        html.Span(
+                            f"Drill-down: {label}",
+                            style={
+                                "marginLeft": "12px",
+                                "fontSize": "16px",
+                                "fontWeight": "bold",
+                            },
+                        ),
+                    ],
+                    style={
+                        "display": "flex",
+                        "alignItems": "center",
+                        "margin": "10px 20px",
+                    },
+                ),
+                dcc.Graph(
+                    figure=fig,
+                    style={
+                        "width": "100%",
+                        "height": "600px",
+                        "margin": "0 20px",
+                    },
+                ),
+            ]
         )
+
+        return (drilldown_view, *mode_off_outputs)
 
     # --------------------------------------------------------------
     # 7. Start the server
@@ -339,7 +360,7 @@ def launch_dash_dashboard(
 
 
 # ------------------------------------------------------------------
-# 8. Render overview plots (unchanged from original)
+# 8. Render overview plots
 # ------------------------------------------------------------------
 def _render_combined(extended_plots: ExtendedPlots):
     if not extended_plots:
