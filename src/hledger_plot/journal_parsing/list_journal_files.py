@@ -3,7 +3,7 @@ import shlex
 import subprocess
 from typing import List
 
-from hledger_preprocessor.generics.hashing import hash_something
+from hledger_core.generics.hashing import hash_something
 
 
 def list_journal_files(*, abs_journal_root_filepath: str) -> List[str]:

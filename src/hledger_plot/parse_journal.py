@@ -6,10 +6,10 @@ from io import StringIO
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
-from hledger_preprocessor.Currencies.fetch_rates import (
+from hledger_core.Currencies.fetch_rates import (
     fetch_exchange_rates,
 )
-from hledger_preprocessor.Currency import (
+from hledger_core.Currency import (
     Currency,
     load_latest_rates,
 )

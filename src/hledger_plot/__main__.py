@@ -3,7 +3,7 @@
 import os
 from typing import Any, Dict
 
-from hledger_preprocessor.Currency import Currency
+from hledger_core.Currency import Currency
 from typeguard import typechecked
 
 from hledger_plot.arg_parser import create_arg_parser, verify_args

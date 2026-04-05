@@ -6,11 +6,11 @@ from enum import Enum
 from pathlib import Path
 from typing import List
 
-from hledger_preprocessor.config.Config import Config
-from hledger_preprocessor.config.load_config import (
+from hledger_config.config.Config import Config
+from hledger_config.config.load_config import (
     load_config,
 )
-from hledger_preprocessor.Currency import Currency
+from hledger_core.Currency import Currency
 
 from hledger_plot.create_plots.scrambler import (
     get_rand_categories,
