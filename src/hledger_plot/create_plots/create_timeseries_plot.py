@@ -107,8 +107,9 @@ def create_category_timeseries(
 
     df = df.sort_values("date").reset_index(drop=True)
 
-    # Use absolute amounts (expenses are already positive in register).
-    df["abs_amount"] = df["amount"].abs()
+    # Use actual signed amounts (expenses are positive in register,
+    # asset outflows are negative).
+    df["abs_amount"] = df["amount"]
     df["cumulative"] = df["abs_amount"].cumsum()
 
     # Subcategory colour grouping.
