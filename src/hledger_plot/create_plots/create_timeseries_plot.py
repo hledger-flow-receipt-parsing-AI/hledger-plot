@@ -209,21 +209,23 @@ def create_category_timeseries(
             )
         )
 
-    # All-time average: single horizontal line across the full range.
-    overall_avg = df["abs_amount"].mean()
-    fig.add_trace(
-        go.Scatter(
-            x=[dates.iloc[0], dates.iloc[-1]],
-            y=[overall_avg, overall_avg],
-            mode="lines",
-            name=f"Period avg ({display_currency} {overall_avg:,.2f})",
-            line=dict(color="#2ca02c", width=2, dash="dot"),
-            hovertemplate=(
-                display_currency
-                + " %{y:,.2f}<extra>Period avg</extra>"
-            ),
+    # Period average per month: total spent / number of months.
+    monthly_totals = daily.resample("MS").sum()
+    if len(monthly_totals) > 0:
+        monthly_avg = monthly_totals.mean()
+        fig.add_trace(
+            go.Scatter(
+                x=[dates.iloc[0], dates.iloc[-1]],
+                y=[monthly_avg, monthly_avg],
+                mode="lines",
+                name=f"Monthly avg ({display_currency} {monthly_avg:,.2f})",
+                line=dict(color="#2ca02c", width=2, dash="dot"),
+                hovertemplate=(
+                    display_currency
+                    + " %{y:,.2f}<extra>Monthly avg</extra>"
+                ),
+            )
         )
-    )
 
     # X-axis: linear date axis with max 30 ticks.
     max_ticks = 30
