@@ -365,47 +365,36 @@ def launch_dash_dashboard(
                 id="all-period-options",
                 data=json.dumps(all_period_options),
             ),
-            # Invisible input to capture keyboard events.
-            html.Div(
-                id="keyboard-listener",
-                tabIndex="0",
-                style={
-                    "position": "fixed",
-                    "top": "0",
-                    "left": "0",
-                    "width": "100%",
-                    "height": "100%",
-                    "zIndex": "-1",
-                    "opacity": "0",
-                },
-                **{"data-dummy": ""},
-            ),
+            # Store incremented by keyboard shortcut to trigger callback.
+            dcc.Store(id="keyboard-drilldown-trigger", data=0),
+            dcc.Store(id="keyboard-back-trigger", data=0),
         ]
     )
 
     # ----------------------------------------------------------
-    # Clientside callback: listen for 'd' keypress to click
-    # the drill-down button, and 'Escape' to click back.
+    # Keyboard shortcuts via injected script.
+    # 'd' toggles drill-down mode, 'Escape' clicks back.
     # ----------------------------------------------------------
-    app.clientside_callback(
-        """
-        function(id) {
-            document.addEventListener('keydown', function(e) {
-                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-                if (e.key === 'd' || e.key === 'D') {
-                    var btn = document.getElementById('drilldown-mode-btn');
-                    if (btn) btn.click();
-                }
-                if (e.key === 'Escape') {
-                    var back = document.getElementById('back-btn');
-                    if (back && back.offsetParent !== null) back.click();
-                }
-            });
-            return window.dash_clientside.no_update;
-        }
-        """,
-        Output("keyboard-listener", "data-dummy"),
-        Input("keyboard-listener", "id"),
+    app.index_string = app.index_string.replace(
+        "</body>",
+        """<script>
+        document.addEventListener('keydown', function(e) {
+            var tag = e.target.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+            // Also skip if the Dash dropdown search input is focused.
+            if (e.target.getAttribute('role') === 'combobox') return;
+            if (e.key === 'd' || e.key === 'D') {
+                e.preventDefault();
+                var btn = document.getElementById('drilldown-mode-btn');
+                if (btn) btn.click();
+            }
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                var back = document.getElementById('back-btn');
+                if (back && back.offsetParent !== null) back.click();
+            }
+        });
+        </script></body>""",
     )
 
     # ----------------------------------------------------------
