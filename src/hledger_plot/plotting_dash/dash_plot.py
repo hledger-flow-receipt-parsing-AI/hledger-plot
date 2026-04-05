@@ -3,10 +3,13 @@
 #
 #  "Drill-down Mode" button  ->  click treemap cell  ->  time-series
 #  "Back to Overview" button ->  return to treemaps
+#  Keyboard shortcut 'd' toggles drill-down mode.
+#  Granularity selector: Weekly / Monthly / Yearly / All Time.
 # --------------------------------------------------------------
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 from typing import Any
 
 from dash import ALL, Dash, Input, Output, State, callback_context, dcc, html
@@ -56,6 +59,131 @@ def _parse_period(period_str: str) -> tuple[int, int]:
     return month, year
 
 
+def _build_period_options(
+    years_and_months: dict[int, set[int]],
+) -> dict[str, list[dict[str, str]]]:
+    """Build dropdown options for each granularity level.
+
+    Returns a dict keyed by "weekly", "monthly", "yearly".
+    Each value is a list of {label, value} dicts.
+    """
+    # Monthly options (existing behaviour).
+    monthly: list[dict[str, str]] = []
+    for year in sorted(years_and_months.keys()):
+        for month in sorted(years_and_months[year]):
+            monthly.append(
+                {
+                    "label": f"{_MONTHS[month-1]} {year}",
+                    "value": f"m:{month} {year}",
+                }
+            )
+
+    # Yearly options.
+    yearly: list[dict[str, str]] = []
+    for year in sorted(years_and_months.keys()):
+        yearly.append({"label": str(year), "value": f"y:{year}"})
+
+    # Weekly options — enumerate ISO weeks that contain transactions.
+    all_dates: list[datetime] = []
+    for year, months in years_and_months.items():
+        for month in months:
+            # Use the 15th as representative; we just need to generate
+            # week boundaries covering each month.
+            dt = datetime(year, month, 1)
+            while dt.month == month:
+                all_dates.append(dt)
+                dt += timedelta(days=1)
+    if all_dates:
+        min_date = min(all_dates)
+        max_date = max(all_dates)
+    else:
+        min_date = max_date = datetime.now()
+
+    # Walk week by week from the Monday on/before min_date.
+    monday = min_date - timedelta(days=min_date.weekday())
+    weekly: list[dict[str, str]] = []
+    while monday <= max_date:
+        sunday = monday + timedelta(days=6)
+        label = f"{monday.strftime('%d %b')} - {sunday.strftime('%d %b %Y')}"
+        # value encodes start and end as YYYY/M/D
+        value = (
+            f"w:{monday.year}/{monday.month}/{monday.day}"
+            f":{sunday.year}/{sunday.month}/{sunday.day}"
+        )
+        weekly.append({"label": label, "value": value})
+        monday += timedelta(days=7)
+
+    return {"weekly": weekly, "monthly": monthly, "yearly": yearly}
+
+
+def _make_time_period(
+    selected_period: str,
+    *,
+    args: Any,
+    plot_config: PlotConfig,
+) -> TimePeriod:
+    """Create a TimePeriod from a dropdown value string."""
+    account_cats = " ".join(plot_config.top_level_account_categories)
+    currency = Currency(args.display_currency)
+
+    if selected_period == "all_time":
+        return TimePeriod(
+            filename=args.journal_filepath,
+            account_categories=account_cats,
+            disp_currency=currency,
+            month=None,
+            year=None,
+            all_time=True,
+        )
+
+    prefix = selected_period[:2]
+
+    if prefix == "m:":
+        month, year = _parse_period(selected_period[2:])
+        return TimePeriod(
+            filename=args.journal_filepath,
+            account_categories=account_cats,
+            disp_currency=currency,
+            month=month,
+            year=year,
+            all_time=False,
+        )
+
+    if prefix == "y:":
+        year = int(selected_period[2:])
+        return TimePeriod(
+            filename=args.journal_filepath,
+            account_categories=account_cats,
+            disp_currency=currency,
+            month=None,
+            year=year,
+            all_time=False,
+        )
+
+    if prefix == "w:":
+        # "w:YYYY/M/D:YYYY/M/D"
+        parts = selected_period[2:].split(":")
+        start_str = parts[0]  # YYYY/M/D
+        end_str = parts[1]  # YYYY/M/D
+        # End date for hledger is exclusive, so add 1 day.
+        ey, em, ed = (int(x) for x in end_str.split("/"))
+        end_excl = datetime(ey, em, ed) + timedelta(days=1)
+        end_hledger = f"{end_excl.year}/{end_excl.month}/{end_excl.day}"
+        return TimePeriod(
+            filename=args.journal_filepath,
+            account_categories=account_cats,
+            disp_currency=currency,
+            month=None,
+            year=None,
+            all_time=False,
+            start_date=start_str,
+            end_date=end_hledger,
+            period_label=f"week_{start_str.replace('/', '_')}",
+        )
+
+    raise ValueError(f"Unknown period format: {selected_period}")
+
+
 # ------------------------------------------------------------------
 # 1. The public entry point
 # ------------------------------------------------------------------
@@ -80,18 +208,7 @@ def launch_dash_dashboard(
         filepath=args.journal_filepath
     )
 
-    options: list[dict[str, str]] = []
-    for year in years_and_months.keys():
-        for month in years_and_months[year]:
-            options.append(
-                {
-                    "label": f"{_MONTHS[month-1]} {year}",
-                    "value": f"{month} {year}",
-                }
-            )
-    options.insert(
-        0, {"label": "All Time", "value": "all_time"}
-    )  # <-- add option
+    all_period_options = _build_period_options(years_and_months)
 
     # --------------------------------------------------------------
     # 3. Dash layout
@@ -109,72 +226,236 @@ def launch_dash_dashboard(
     _btn_active = {**_btn_base, "backgroundColor": "#1a73e8", "color": "white"}
     _hidden = {"display": "none"}
 
+    _sticky_bar = {
+        "position": "sticky",
+        "top": "0",
+        "zIndex": "1000",
+        "backgroundColor": "white",
+        "borderBottom": "1px solid #ddd",
+        "paddingBottom": "8px",
+    }
+
+    _granularity_btn = {
+        "padding": "4px 12px",
+        "fontSize": "13px",
+        "cursor": "pointer",
+        "borderRadius": "4px",
+        "border": "1px solid #ccc",
+        "backgroundColor": "#f0f0f0",
+        "color": "#333",
+        "marginRight": "4px",
+    }
+    _granularity_btn_active = {
+        **_granularity_btn,
+        "backgroundColor": "#333",
+        "color": "white",
+        "border": "1px solid #333",
+    }
+
     app.layout = html.Div(
         [
-            html.H1("Financial Insights Dashboard", style={"margin": "20px"}),
+            # Sticky toolbar.
             html.Div(
-                [
-                    html.Label(
-                        "Select Period:",
-                        style={"marginRight": "8px"},
-                    ),
-                    dcc.Dropdown(
-                        id="period-dropdown",
-                        options=options,
-                        value="all_time",  # default to All Time
-                        style={"width": "260px"},
-                    ),
-                    html.Button(
-                        "Drill-down Mode",
-                        id="drilldown-mode-btn",
-                        n_clicks=0,
-                        style={**_btn_inactive, "marginLeft": "20px"},
-                    ),
-                    html.Span(
-                        id="drilldown-hint",
-                        children="",
-                        style={
-                            "marginLeft": "10px",
-                            "fontSize": "13px",
-                            "color": "#888",
-                            "alignSelf": "center",
-                        },
-                    ),
-                ],
-                style={
-                    "display": "flex",
-                    "alignItems": "center",
-                    "margin": "10px 20px",
-                },
-            ),
-            # Back-bar: sits above plots-container, hidden until drill-down.
-            html.Div(
-                id="back-bar",
-                style=_hidden,
+                id="sticky-toolbar",
+                style=_sticky_bar,
                 children=[
-                    html.Button(
-                        "Back to Overview",
-                        id="back-btn",
-                        n_clicks=0,
-                        style=_btn_inactive,
+                    html.H1(
+                        "Financial Insights Dashboard",
+                        style={"margin": "10px 20px 4px 20px", "fontSize": "22px"},
                     ),
-                    html.Span(
-                        id="drilldown-label",
+                    # Row 1: Granularity + Period dropdown + Drill-down button.
+                    html.Div(
+                        [
+                            html.Label(
+                                "Granularity:",
+                                style={"marginRight": "6px", "fontSize": "13px"},
+                            ),
+                            html.Button(
+                                "Weekly",
+                                id="gran-weekly-btn",
+                                n_clicks=0,
+                                style=_granularity_btn,
+                            ),
+                            html.Button(
+                                "Monthly",
+                                id="gran-monthly-btn",
+                                n_clicks=0,
+                                style=_granularity_btn_active,
+                            ),
+                            html.Button(
+                                "Yearly",
+                                id="gran-yearly-btn",
+                                n_clicks=0,
+                                style=_granularity_btn,
+                            ),
+                            html.Div(
+                                style={"width": "12px", "display": "inline-block"}
+                            ),
+                            html.Label(
+                                "Period:",
+                                style={"marginRight": "6px", "fontSize": "13px"},
+                            ),
+                            dcc.Dropdown(
+                                id="period-dropdown",
+                                options=[
+                                    {"label": "All Time", "value": "all_time"},
+                                ]
+                                + all_period_options["monthly"],
+                                value="all_time",
+                                style={"width": "260px"},
+                            ),
+                            html.Div(
+                                style={"width": "20px", "display": "inline-block"}
+                            ),
+                            html.Button(
+                                "Drill-down Mode (d)",
+                                id="drilldown-mode-btn",
+                                n_clicks=0,
+                                style=_btn_inactive,
+                            ),
+                            html.Span(
+                                id="drilldown-hint",
+                                children="",
+                                style={
+                                    "marginLeft": "10px",
+                                    "fontSize": "13px",
+                                    "color": "#888",
+                                    "alignSelf": "center",
+                                },
+                            ),
+                        ],
                         style={
-                            "marginLeft": "12px",
-                            "fontSize": "16px",
-                            "fontWeight": "bold",
+                            "display": "flex",
+                            "alignItems": "center",
+                            "margin": "4px 20px",
+                            "flexWrap": "wrap",
+                            "gap": "2px",
                         },
+                    ),
+                    # Back-bar: sits inside toolbar, hidden until drill-down.
+                    html.Div(
+                        id="back-bar",
+                        style=_hidden,
+                        children=[
+                            html.Button(
+                                "Back to Overview",
+                                id="back-btn",
+                                n_clicks=0,
+                                style=_btn_inactive,
+                            ),
+                            html.Span(
+                                id="drilldown-label",
+                                style={
+                                    "marginLeft": "12px",
+                                    "fontSize": "16px",
+                                    "fontWeight": "bold",
+                                },
+                            ),
+                        ],
                     ),
                 ],
             ),
             # All plots live here — overview OR drill-down (swapped in-place).
-            html.Div(id="plots-container", style={"marginTop": "20px"}),
+            html.Div(id="plots-container", style={"marginTop": "10px"}),
             # Hidden stores.
             dcc.Store(id="drilldown-mode-store", data=json.dumps(False)),
             dcc.Store(id="overview-cache", data=""),
+            dcc.Store(id="granularity-store", data="monthly"),
+            dcc.Store(
+                id="all-period-options",
+                data=json.dumps(all_period_options),
+            ),
+            # Invisible input to capture keyboard events.
+            html.Div(
+                id="keyboard-listener",
+                tabIndex="0",
+                style={
+                    "position": "fixed",
+                    "top": "0",
+                    "left": "0",
+                    "width": "100%",
+                    "height": "100%",
+                    "zIndex": "-1",
+                    "opacity": "0",
+                },
+                **{"data-dummy": ""},
+            ),
         ]
     )
+
+    # ----------------------------------------------------------
+    # Clientside callback: listen for 'd' keypress to click
+    # the drill-down button, and 'Escape' to click back.
+    # ----------------------------------------------------------
+    app.clientside_callback(
+        """
+        function(id) {
+            document.addEventListener('keydown', function(e) {
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+                if (e.key === 'd' || e.key === 'D') {
+                    var btn = document.getElementById('drilldown-mode-btn');
+                    if (btn) btn.click();
+                }
+                if (e.key === 'Escape') {
+                    var back = document.getElementById('back-btn');
+                    if (back && back.offsetParent !== null) back.click();
+                }
+            });
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("keyboard-listener", "data-dummy"),
+        Input("keyboard-listener", "id"),
+    )
+
+    # ----------------------------------------------------------
+    # 4a. Granularity button click -> update dropdown options.
+    # ----------------------------------------------------------
+    @app.callback(
+        Output("period-dropdown", "options"),
+        Output("period-dropdown", "value"),
+        Output("granularity-store", "data"),
+        Output("gran-weekly-btn", "style"),
+        Output("gran-monthly-btn", "style"),
+        Output("gran-yearly-btn", "style"),
+        Input("gran-weekly-btn", "n_clicks"),
+        Input("gran-monthly-btn", "n_clicks"),
+        Input("gran-yearly-btn", "n_clicks"),
+        State("all-period-options", "data"),
+        prevent_initial_call=True,
+    )
+    def _change_granularity(
+        wk_clicks, mo_clicks, yr_clicks, all_opts_json
+    ):
+        ctx = callback_context
+        if not ctx.triggered:
+            raise PreventUpdate
+
+        trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        all_opts = json.loads(all_opts_json)
+
+        gran_map = {
+            "gran-weekly-btn": ("weekly", "Weekly"),
+            "gran-monthly-btn": ("monthly", "Monthly"),
+            "gran-yearly-btn": ("yearly", "Yearly"),
+        }
+        gran_key, _ = gran_map.get(trigger_id, ("monthly", "Monthly"))
+        period_opts = [{"label": "All Time", "value": "all_time"}] + all_opts[
+            gran_key
+        ]
+
+        styles = []
+        for btn_id in [
+            "gran-weekly-btn",
+            "gran-monthly-btn",
+            "gran-yearly-btn",
+        ]:
+            if btn_id == trigger_id:
+                styles.append(_granularity_btn_active)
+            else:
+                styles.append(_granularity_btn)
+
+        return (period_opts, "all_time", gran_key, *styles)
 
     # --------------------------------------------------------------
     # 4. Callback: period change -> re-run pipeline -> render plots
@@ -185,30 +466,9 @@ def launch_dash_dashboard(
         Input("period-dropdown", "value"),
     )
     def _update_dashboard(selected_period: str):
-        if selected_period == "all_time":
-            time_period = TimePeriod(
-                filename=args.journal_filepath,
-                account_categories=" ".join(
-                    plot_config.top_level_account_categories
-                ),
-                disp_currency=Currency(args.display_currency),
-                month=None,
-                year=None,
-                all_time=True,
-            )
-        else:
-            month, year = _parse_period(selected_period)
-            time_period = TimePeriod(
-                filename=args.journal_filepath,
-                account_categories=" ".join(
-                    plot_config.top_level_account_categories
-                ),
-                disp_currency=Currency(args.display_currency),
-                month=month,
-                year=year,
-                all_time=False,
-            )
-
+        time_period = _make_time_period(
+            selected_period, args=args, plot_config=plot_config
+        )
         extended_plots: ExtendedPlots = run_pipeline(
             args=args,
             plot_config=plot_config,
@@ -234,12 +494,12 @@ def launch_dash_dashboard(
         if new_mode:
             return (
                 json.dumps(True),
-                {**_btn_active, "marginLeft": "20px"},
+                _btn_active,
                 "Click any treemap cell to drill down",
             )
         return (
             json.dumps(False),
-            {**_btn_inactive, "marginLeft": "20px"},
+            _btn_inactive,
             "",
         )
 
@@ -271,36 +531,17 @@ def launch_dash_dashboard(
         trigger_id = ctx.triggered[0]["prop_id"]
         mode_off = (
             json.dumps(False),
-            {**_btn_inactive, "marginLeft": "20px"},
+            _btn_inactive,
             "",
         )
 
         # Back button -> re-render overview from current period.
         if "back-btn" in trigger_id:
-            period = current_period or "all_time"
-            if period == "all_time":
-                time_period = TimePeriod(
-                    filename=args.journal_filepath,
-                    account_categories=" ".join(
-                        plot_config.top_level_account_categories
-                    ),
-                    disp_currency=Currency(args.display_currency),
-                    month=None,
-                    year=None,
-                    all_time=True,
-                )
-            else:
-                m, y = _parse_period(period)
-                time_period = TimePeriod(
-                    filename=args.journal_filepath,
-                    account_categories=" ".join(
-                        plot_config.top_level_account_categories
-                    ),
-                    disp_currency=Currency(args.display_currency),
-                    month=m,
-                    year=y,
-                    all_time=False,
-                )
+            time_period = _make_time_period(
+                current_period or "all_time",
+                args=args,
+                plot_config=plot_config,
+            )
             extended_plots: ExtendedPlots = run_pipeline(
                 args=args,
                 plot_config=plot_config,
@@ -348,7 +589,7 @@ def launch_dash_dashboard(
         back_bar_style = {
             "display": "flex",
             "alignItems": "center",
-            "margin": "10px 20px",
+            "margin": "4px 20px",
         }
 
         return (

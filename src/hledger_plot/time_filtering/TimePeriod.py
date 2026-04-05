@@ -17,6 +17,9 @@ class TimePeriod:
         all_time: bool,
         month: Optional[int],
         year: Optional[int],
+        period_label: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
     ) -> None:
         self.filename: str = filename
         self.account_categories: str = account_categories
@@ -24,6 +27,9 @@ class TimePeriod:
         self.month: Optional[int] = month
         self.year: Optional[int] = year
         self.all_time: bool = all_time
+        self._period_label: Optional[str] = period_label
+        self._start_date: Optional[str] = start_date
+        self._end_date: Optional[str] = end_date
 
         self.years_and_months: Dict[int, set[int]] = (
             get_years_and_months_from_hledger(filepath=filename)
@@ -45,6 +51,29 @@ class TimePeriod:
             "--cost --infer-value",
         ]
 
+        # Explicit date range mode (used for weekly periods).
+        if start_date is not None and end_date is not None:
+            period = f"{start_date} to {end_date}"
+            exotic = (
+                " " + " ".join(self.required_exotic_args)
+                if self.required_exotic_args
+                else ""
+            )
+            raw_exotic = (
+                " " + " ".join(self.raw_exotic_args)
+                if self.raw_exotic_args
+                else ""
+            )
+            self.hledger_command = (
+                f"hledger -f {filename} balance {account_categories} "
+                f"--no-total --output-format csv -p '{period}'{exotic}"
+            )
+            self.raw_hledger_command = (
+                f"hledger -f {filename} balance {account_categories} "
+                f"--no-total --output-format csv -p '{period}'{raw_exotic}"
+            )
+            return
+
         if not all_time:
             if year is None:
                 if month is None:
@@ -59,8 +88,22 @@ class TimePeriod:
                     )
             else:
                 if month is None:
-                    raise NotImplementedError(
-                        "Did not yet showing a whole year."
+                    # Yearly view: whole year.
+                    self.hledger_command: str = (
+                        build_hledger_command_for_year(
+                            filename=filename,
+                            account_categories=account_categories,
+                            year=year,
+                            required_exotic_args=self.required_exotic_args,
+                        )
+                    )
+                    self.raw_hledger_command: str = (
+                        build_hledger_command_for_year(
+                            filename=filename,
+                            account_categories=account_categories,
+                            year=year,
+                            required_exotic_args=self.raw_exotic_args,
+                        )
                     )
                 else:
                     self.hledger_command: str = (
@@ -95,8 +138,12 @@ class TimePeriod:
             )
 
     def get_period(self) -> str:
+        if self._period_label:
+            return self._period_label
         if self.all_time:
             return "all_time"
+        elif self.month is None:
+            return f"{self.year}"
         else:
             return f"{self.year}_{self.month:02d}"
 
@@ -111,6 +158,29 @@ def build_hledger_command_all_time(
         + " ".join(required_exotic_args)
     )
     return default_command
+
+
+def build_hledger_command_for_year(
+    *,
+    filename: str,
+    account_categories: str,
+    year: int,
+    required_exotic_args: Optional[List[str]] = None,
+) -> str:
+    """Build a hledger balance command for an entire year."""
+    if not isinstance(year, int) or year < 0:
+        raise ValueError("Year must be a positive integer.")
+
+    period = f"{year}/1/1 to {year + 1}/1/1"
+
+    exotic_args_str = ""
+    if required_exotic_args:
+        exotic_args_str = " " + " ".join(required_exotic_args)
+
+    return (
+        f"hledger -f {filename} balance {account_categories} "
+        f"--no-total --output-format csv -p '{period}'{exotic_args_str}"
+    )
 
 
 def build_hledger_command_for_period(
