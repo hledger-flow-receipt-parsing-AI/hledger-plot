@@ -1,6 +1,6 @@
 from typing import Dict, List, Optional, Set
 
-from hledger_preprocessor.Currency import Currency
+from hledger_core.Currency import Currency
 
 from hledger_plot.time_filtering.get_available_periods import (
     get_years_and_months_from_hledger,

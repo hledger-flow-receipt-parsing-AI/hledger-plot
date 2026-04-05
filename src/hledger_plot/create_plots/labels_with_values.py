@@ -5,7 +5,7 @@ import base64
 
 # Assuming 'fig' is a Plotly Figure object (or similar wrapper)
 import numpy as np
-from hledger_preprocessor.Currency import Currency
+from hledger_core.Currency import Currency
 from plotly.graph_objects import (
     Figure,  # Import Figure if you have access to it; Import for type hinting if available
 )

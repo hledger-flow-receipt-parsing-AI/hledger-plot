@@ -14,7 +14,7 @@ from typing import Any
 
 from dash import ALL, Dash, Input, Output, State, callback_context, dcc, html
 from dash.exceptions import PreventUpdate
-from hledger_preprocessor.Currency import Currency
+from hledger_core.Currency import Currency
 from typeguard import typechecked
 
 from hledger_plot.create_plots.create_timeseries_plot import (
