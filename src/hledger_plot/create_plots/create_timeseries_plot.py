@@ -166,6 +166,35 @@ def create_category_timeseries(
         )
     )
 
+    # Moving averages (weekly = 7-day, monthly = 30-day).
+    # Resample to daily totals, compute rolling mean, then map back to
+    # the transaction-based x-axis indices.
+    daily = df.set_index("date")["abs_amount"].resample("D").sum()
+    for window, label, colour, dash_style in [
+        (7, "7-day avg", "#e377c2", "dash"),
+        (30, "30-day avg", "#17becf", "longdash"),
+    ]:
+        if len(daily) < window:
+            continue
+        rolling = daily.rolling(window=window, min_periods=1).mean()
+        # Map each transaction date to its rolling value.
+        ma_values = rolling.reindex(df["date"].values).values
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=ma_values,
+                mode="lines",
+                name=label,
+                line=dict(color=colour, width=2, dash=dash_style),
+                hovertemplate=(
+                    display_currency
+                    + " %{y:,.2f}<extra>"
+                    + label
+                    + "</extra>"
+                ),
+            )
+        )
+
     # X-axis: show dates as tick labels (max 30 to stay readable).
     max_ticks = 30
     all_indices = list(df.index)
