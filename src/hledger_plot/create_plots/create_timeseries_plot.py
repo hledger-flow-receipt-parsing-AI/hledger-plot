@@ -67,15 +67,14 @@ def _run_hledger_register(
 
 @typechecked
 def _subcategory_label(*, account: str, prefix: str) -> str:
-    """Return the portion of *account* after *prefix*.
+    """Return the hierarchical remainder of *account* after *prefix*.
 
-    E.g. ``_subcategory_label(account='expenses:food:fruit', prefix='expenses:food')``
-    returns ``'fruit'``.  If there is nothing after the prefix the full leaf
-    name (last segment) is returned.
+    E.g. ``_subcategory_label(account='expenses:monthly:abbonnement:phone',
+    prefix='expenses:monthly')`` returns ``'abbonnement:phone'``.
     """
     if account.startswith(prefix + ":"):
         remainder = account[len(prefix) + 1:]
-        return remainder.split(":")[0] if remainder else account.rsplit(":", 1)[-1]
+        return remainder if remainder else account.rsplit(":", 1)[-1]
     return account.rsplit(":", 1)[-1]
 
 
@@ -108,7 +107,9 @@ def create_category_timeseries(
     subcategory.  A cumulative line is overlaid on a secondary y-axis.
     X-axis is a linear date timeline (gaps in time show as gaps on chart).
 
-    Legend is grouped into: Subcategories, Totals, Averages, Cumulative.
+    Two legends:
+    - Left (legend): Totals, Averages, Cumulative — each independently toggleable.
+    - Right (legend2): Subcategories with hierarchical names.
     """
     df = _run_hledger_register(
         journal_filepath=journal_filepath,
@@ -130,7 +131,7 @@ def create_category_timeseries(
     df["abs_amount"] = df["amount"]
     df["cumulative"] = df["abs_amount"].cumsum()
 
-    # Subcategory colour grouping.
+    # Subcategory colour grouping — full hierarchical remainder.
     df["subcategory"] = df["account"].apply(
         lambda a: _subcategory_label(account=a, prefix=account_prefix)
     )
@@ -159,8 +160,8 @@ def create_category_timeseries(
     # Use actual dates for x-axis (linear timeline).
     dates = df["date"]
 
-    # ---- Subcategory bars (legend group: "Subcategories") ----
-    for i, subcat in enumerate(unique_subcats):
+    # ---- Subcategory bars (legend2 = right side) ----
+    for subcat in unique_subcats:
         mask = df["subcategory"] == subcat
         sub = df[mask]
         fig.add_trace(
@@ -171,12 +172,11 @@ def create_category_timeseries(
                 marker_color=colour_map[subcat],
                 hovertext=sub["hover"],
                 hoverinfo="text",
-                legendgroup="subcategories",
-                legendgrouptitle_text="Subcategories" if i == 0 else None,
+                legend="legend2",
             )
         )
 
-    # ---- Cumulative line (legend group: standalone) ----
+    # ---- Cumulative line (legend = left side) ----
     fig.add_trace(
         go.Scatter(
             x=dates,
@@ -188,19 +188,19 @@ def create_category_timeseries(
             hovertemplate=(
                 display_currency + " %{y:,.2f}<extra>Cumulative</extra>"
             ),
+            legend="legend",
         )
     )
 
-    # ---- Period totals (legend group: "Totals") ----
+    # ---- Period totals (legend = left side) ----
     daily = df.set_index("date")["abs_amount"].resample("D").sum()
 
     totals_config = [
-        ("W-MON", "Weekly", "#e377c2", "solid"),
-        ("MS", "Monthly", "#17becf", "solid"),
-        ("YS", "Yearly", "#d62728", "dashdot"),
+        ("W-MON", "Weekly total", "#e377c2", "solid"),
+        ("MS", "Monthly total", "#17becf", "solid"),
+        ("YS", "Yearly total", "#d62728", "dashdot"),
     ]
 
-    first_total = True
     for freq, label, colour, dash_style in totals_config:
         period_total = daily.resample(freq).sum()
         if period_total.empty:
@@ -219,17 +219,14 @@ def create_category_timeseries(
                     display_currency
                     + " %{y:,.2f}<extra>"
                     + label
-                    + " total</extra>"
+                    + "</extra>"
                 ),
-                legendgroup="totals",
-                legendgrouptitle_text="Totals" if first_total else None,
+                legend="legend",
             )
         )
-        first_total = False
 
-    # ---- Averages (legend group: "Averages") ----
+    # ---- Averages (legend = left side) ----
     monthly_totals = daily.resample("MS").sum()
-    first_avg = True
 
     # Overall monthly average.
     if len(monthly_totals) > 0:
@@ -239,17 +236,15 @@ def create_category_timeseries(
                 x=[dates.iloc[0], dates.iloc[-1]],
                 y=[monthly_avg, monthly_avg],
                 mode="lines",
-                name=f"Monthly ({display_currency} {monthly_avg:,.2f})",
+                name=f"Monthly avg ({display_currency} {monthly_avg:,.2f})",
                 line=dict(color="#2ca02c", width=2, dash="dot"),
                 hovertemplate=(
                     display_currency
                     + " %{y:,.2f}<extra>Monthly avg</extra>"
                 ),
-                legendgroup="averages",
-                legendgrouptitle_text="Averages" if first_avg else None,
+                legend="legend",
             )
         )
-        first_avg = False
 
     # Per-year monthly average (disconnected segments per year).
     yearly_monthly_avg = monthly_totals.resample("YS").mean()
@@ -268,8 +263,7 @@ def create_category_timeseries(
                     display_currency
                     + " %{y:,.2f}<extra>Yearly monthly avg</extra>"
                 ),
-                legendgroup="averages",
-                legendgrouptitle_text="Averages" if first_avg else None,
+                legend="legend",
             )
         )
 
@@ -306,16 +300,26 @@ def create_category_timeseries(
             rangemode="tozero",
         ),
         barmode="stack",
+        # Left legend: totals, averages, cumulative.
         legend=dict(
+            title="Lines",
+            orientation="v",
+            yanchor="top",
+            y=1,
+            xanchor="right",
+            x=-0.05,
+        ),
+        # Right legend: subcategories.
+        legend2=dict(
+            title="Categories",
             orientation="v",
             yanchor="top",
             y=1,
             xanchor="left",
-            x=1.06,
-            groupclick="togglegroup",
+            x=1.02,
         ),
         height=600,
-        margin=dict(t=80, b=120, r=200),
+        margin=dict(t=80, b=120, l=200, r=180),
     )
 
     return fig
