@@ -107,6 +107,7 @@ def launch_dash_dashboard(
     }
     _btn_inactive = {**_btn_base, "backgroundColor": "#f0f0f0", "color": "#333"}
     _btn_active = {**_btn_base, "backgroundColor": "#1a73e8", "color": "white"}
+    _hidden = {"display": "none"}
 
     app.layout = html.Div(
         [
@@ -146,11 +147,31 @@ def launch_dash_dashboard(
                     "margin": "10px 20px",
                 },
             ),
+            # Back-bar: sits above plots-container, hidden until drill-down.
+            html.Div(
+                id="back-bar",
+                style=_hidden,
+                children=[
+                    html.Button(
+                        "Back to Overview",
+                        id="back-btn",
+                        n_clicks=0,
+                        style=_btn_inactive,
+                    ),
+                    html.Span(
+                        id="drilldown-label",
+                        style={
+                            "marginLeft": "12px",
+                            "fontSize": "16px",
+                            "fontWeight": "bold",
+                        },
+                    ),
+                ],
+            ),
             # All plots live here — overview OR drill-down (swapped in-place).
             html.Div(id="plots-container", style={"marginTop": "20px"}),
-            # Hidden store: tracks whether drill-down mode is on.
+            # Hidden stores.
             dcc.Store(id="drilldown-mode-store", data=json.dumps(False)),
-            # Hidden store: caches the last overview HTML so we can restore it.
             dcc.Store(id="overview-cache", data=""),
         ]
     )
@@ -188,15 +209,12 @@ def launch_dash_dashboard(
                 all_time=False,
             )
 
-        # ---- run the heavy pipeline (returns list[Figure]) ------
         extended_plots: ExtendedPlots = run_pipeline(
             args=args,
             plot_config=plot_config,
             time_period=time_period,
         )
-        # ---- stitch the figures together with correct heights ----
         children = _render_combined(extended_plots=extended_plots)
-        # Cache a marker so we know to re-render on "Back".
         return children, selected_period
 
     # --------------------------------------------------------------
@@ -231,6 +249,8 @@ def launch_dash_dashboard(
     # --------------------------------------------------------------
     @app.callback(
         Output("plots-container", "children", allow_duplicate=True),
+        Output("back-bar", "style"),
+        Output("drilldown-label", "children"),
         # Reset mode after drill-down.
         Output("drilldown-mode-store", "data", allow_duplicate=True),
         Output("drilldown-mode-btn", "style", allow_duplicate=True),
@@ -238,19 +258,18 @@ def launch_dash_dashboard(
         Input("back-btn", "n_clicks"),
         Input({"type": "treemap-graph", "index": ALL}, "clickData"),
         State("drilldown-mode-store", "data"),
-        State("overview-cache", "data"),
         State("period-dropdown", "value"),
         prevent_initial_call=True,
     )
     def _handle_drilldown(
-        back_clicks, all_click_data, mode_json, cached_period, current_period
+        back_clicks, all_click_data, mode_json, current_period
     ):
         ctx = callback_context
         if not ctx.triggered:
             raise PreventUpdate
 
         trigger_id = ctx.triggered[0]["prop_id"]
-        mode_off_outputs = (
+        mode_off = (
             json.dumps(False),
             {**_btn_inactive, "marginLeft": "20px"},
             "",
@@ -271,15 +290,15 @@ def launch_dash_dashboard(
                     all_time=True,
                 )
             else:
-                month, year = _parse_period(period)
+                m, y = _parse_period(period)
                 time_period = TimePeriod(
                     filename=args.journal_filepath,
                     account_categories=" ".join(
                         plot_config.top_level_account_categories
                     ),
                     disp_currency=Currency(args.display_currency),
-                    month=month,
-                    year=year,
+                    month=m,
+                    year=y,
                     all_time=False,
                 )
             extended_plots: ExtendedPlots = run_pipeline(
@@ -288,7 +307,7 @@ def launch_dash_dashboard(
                 time_period=time_period,
             )
             overview = _render_combined(extended_plots=extended_plots)
-            return (overview, *mode_off_outputs)
+            return (overview, _hidden, "", *mode_off)
 
         # A treemap was clicked — only act if drill-down mode is on.
         mode_on = json.loads(mode_json)
@@ -314,32 +333,8 @@ def launch_dash_dashboard(
             display_currency=args.display_currency,
         )
 
-        # Replace plots-container with drill-down view.
         drilldown_view = html.Div(
             [
-                html.Div(
-                    [
-                        html.Button(
-                            "Back to Overview",
-                            id="back-btn",
-                            n_clicks=0,
-                            style=_btn_inactive,
-                        ),
-                        html.Span(
-                            f"Drill-down: {label}",
-                            style={
-                                "marginLeft": "12px",
-                                "fontSize": "16px",
-                                "fontWeight": "bold",
-                            },
-                        ),
-                    ],
-                    style={
-                        "display": "flex",
-                        "alignItems": "center",
-                        "margin": "10px 20px",
-                    },
-                ),
                 dcc.Graph(
                     figure=fig,
                     style={
@@ -350,8 +345,18 @@ def launch_dash_dashboard(
                 ),
             ]
         )
+        back_bar_style = {
+            "display": "flex",
+            "alignItems": "center",
+            "margin": "10px 20px",
+        }
 
-        return (drilldown_view, *mode_off_outputs)
+        return (
+            drilldown_view,
+            back_bar_style,
+            f"Drill-down: {label}",
+            *mode_off,
+        )
 
     # --------------------------------------------------------------
     # 7. Start the server
