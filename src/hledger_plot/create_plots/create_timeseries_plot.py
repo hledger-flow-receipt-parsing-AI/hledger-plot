@@ -79,6 +79,22 @@ def _subcategory_label(*, account: str, prefix: str) -> str:
     return account.rsplit(":", 1)[-1]
 
 
+def _build_disconnected_segments(
+    period_total: pd.Series, last_date: pd.Timestamp
+) -> tuple[list, list]:
+    """Build x/y lists for disconnected horizontal segments."""
+    step_x: list = []
+    step_y: list = []
+    for i, (period_start, total) in enumerate(period_total.items()):
+        if i + 1 < len(period_total):
+            period_end = period_total.index[i + 1]
+        else:
+            period_end = last_date + pd.Timedelta(days=1)
+        step_x.extend([period_start, period_end, None])
+        step_y.extend([total, total, None])
+    return step_x, step_y
+
+
 @typechecked
 def create_category_timeseries(
     *,
@@ -91,6 +107,8 @@ def create_category_timeseries(
     Each bar represents one transaction.  Bars are coloured by direct
     subcategory.  A cumulative line is overlaid on a secondary y-axis.
     X-axis is a linear date timeline (gaps in time show as gaps on chart).
+
+    Legend is grouped into: Subcategories, Totals, Averages, Cumulative.
     """
     df = _run_hledger_register(
         journal_filepath=journal_filepath,
@@ -141,8 +159,8 @@ def create_category_timeseries(
     # Use actual dates for x-axis (linear timeline).
     dates = df["date"]
 
-    # One bar trace per subcategory (for legend grouping).
-    for subcat in unique_subcats:
+    # ---- Subcategory bars (legend group: "Subcategories") ----
+    for i, subcat in enumerate(unique_subcats):
         mask = df["subcategory"] == subcat
         sub = df[mask]
         fig.add_trace(
@@ -153,10 +171,12 @@ def create_category_timeseries(
                 marker_color=colour_map[subcat],
                 hovertext=sub["hover"],
                 hoverinfo="text",
+                legendgroup="subcategories",
+                legendgrouptitle_text="Subcategories" if i == 0 else None,
             )
         )
 
-    # Cumulative line on secondary y-axis.
+    # ---- Cumulative line (legend group: standalone) ----
     fig.add_trace(
         go.Scatter(
             x=dates,
@@ -171,29 +191,23 @@ def create_category_timeseries(
         )
     )
 
-    # Weekly and monthly totals as flat step-lines on primary y-axis.
-    # Each line is a horizontal step showing the total spent in that
-    # calendar week / month.
+    # ---- Period totals (legend group: "Totals") ----
     daily = df.set_index("date")["abs_amount"].resample("D").sum()
-    for freq, label, colour, dash_style in [
-        ("W-MON", "Weekly total", "#e377c2", "dash"),
-        ("MS", "Monthly total", "#17becf", "longdash"),
-        ("YS", "Yearly total", "#d62728", "dashdot"),
-    ]:
+
+    totals_config = [
+        ("W-MON", "Weekly", "#e377c2", "solid"),
+        ("MS", "Monthly", "#17becf", "solid"),
+        ("YS", "Yearly", "#d62728", "dashdot"),
+    ]
+
+    first_total = True
+    for freq, label, colour, dash_style in totals_config:
         period_total = daily.resample(freq).sum()
         if period_total.empty:
             continue
-        # Build disconnected horizontal segments (no vertical joins).
-        step_x = []
-        step_y = []
-        for i, (period_start, total) in enumerate(period_total.items()):
-            if i + 1 < len(period_total):
-                period_end = period_total.index[i + 1]
-            else:
-                period_end = dates.iloc[-1] + pd.Timedelta(days=1)
-            step_x.extend([period_start, period_end, None])
-            step_y.extend([total, total, None])
-
+        step_x, step_y = _build_disconnected_segments(
+            period_total, dates.iloc[-1]
+        )
         fig.add_trace(
             go.Scatter(
                 x=step_x,
@@ -205,13 +219,19 @@ def create_category_timeseries(
                     display_currency
                     + " %{y:,.2f}<extra>"
                     + label
-                    + "</extra>"
+                    + " total</extra>"
                 ),
+                legendgroup="totals",
+                legendgrouptitle_text="Totals" if first_total else None,
             )
         )
+        first_total = False
 
-    # Period average per month: total spent / number of months.
+    # ---- Averages (legend group: "Averages") ----
     monthly_totals = daily.resample("MS").sum()
+    first_avg = True
+
+    # Overall monthly average.
     if len(monthly_totals) > 0:
         monthly_avg = monthly_totals.mean()
         fig.add_trace(
@@ -219,21 +239,44 @@ def create_category_timeseries(
                 x=[dates.iloc[0], dates.iloc[-1]],
                 y=[monthly_avg, monthly_avg],
                 mode="lines",
-                name=f"Monthly avg ({display_currency} {monthly_avg:,.2f})",
+                name=f"Monthly ({display_currency} {monthly_avg:,.2f})",
                 line=dict(color="#2ca02c", width=2, dash="dot"),
                 hovertemplate=(
                     display_currency
                     + " %{y:,.2f}<extra>Monthly avg</extra>"
                 ),
+                legendgroup="averages",
+                legendgrouptitle_text="Averages" if first_avg else None,
+            )
+        )
+        first_avg = False
+
+    # Per-year monthly average (disconnected segments per year).
+    yearly_monthly_avg = monthly_totals.resample("YS").mean()
+    if len(yearly_monthly_avg) > 0:
+        step_x, step_y = _build_disconnected_segments(
+            yearly_monthly_avg, dates.iloc[-1]
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=step_x,
+                y=step_y,
+                mode="lines",
+                name="Yearly monthly avg",
+                line=dict(color="#9467bd", width=2, dash="dot"),
+                hovertemplate=(
+                    display_currency
+                    + " %{y:,.2f}<extra>Yearly monthly avg</extra>"
+                ),
+                legendgroup="averages",
+                legendgrouptitle_text="Averages" if first_avg else None,
             )
         )
 
     # X-axis: linear date axis with max 30 ticks.
     max_ticks = 30
-    date_range = dates.iloc[-1] - dates.iloc[0]
     n_transactions = len(dates)
     if n_transactions > max_ticks:
-        # Pick evenly spaced dates across the range.
         tick_dates = pd.date_range(
             start=dates.iloc[0], end=dates.iloc[-1], periods=max_ticks
         )
@@ -263,9 +306,16 @@ def create_category_timeseries(
             rangemode="tozero",
         ),
         barmode="stack",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        legend=dict(
+            orientation="v",
+            yanchor="top",
+            y=1,
+            xanchor="left",
+            x=1.06,
+            groupclick="togglegroup",
+        ),
         height=600,
-        margin=dict(t=80, b=120),
+        margin=dict(t=80, b=120, r=200),
     )
 
     return fig
