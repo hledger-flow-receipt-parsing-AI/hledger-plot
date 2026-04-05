@@ -94,6 +94,78 @@ def _build_disconnected_segments(
     return step_x, step_y
 
 
+def _sort_subcategories(
+    subcats: list[str],
+) -> tuple[list[str], dict[str, tuple[str, str | None]]]:
+    """Sort subcategories so hierarchical groups are contiguous.
+
+    Returns:
+        sorted_subcats: ordered list of subcategory names.
+        group_info: dict mapping each subcat to (legendgroup, grouptitle).
+            - Multi-child groups (2+ children): group = first segment,
+              grouptitle = first segment.  The parent itself (if present)
+              is included in the group.
+            - Single-child or flat items: group = "_flat", grouptitle = None.
+
+    Example input::
+
+        ['ah', 'ah:kiosk', 'ah:to_go', 'aldi', 'biomarkt',
+         'decathlon:creatine', 'ekoplaza']
+
+    Sorted output order::
+
+        ['ah', 'ah:kiosk', 'ah:to_go', 'aldi', 'biomarkt',
+         'decathlon:creatine', 'ekoplaza']
+
+    group_info::
+
+        'ah'                 -> ('ah', 'ah')       # multi-child group
+        'ah:kiosk'           -> ('ah', 'ah')
+        'ah:to_go'           -> ('ah', 'ah')
+        'aldi'               -> ('_flat', None)     # flat
+        'biomarkt'           -> ('_flat', None)     # flat
+        'decathlon:creatine' -> ('_flat', None)     # single child → flat
+        'ekoplaza'           -> ('_flat', None)     # flat
+    """
+    from collections import defaultdict
+
+    # 1. Bucket by first segment.
+    buckets: dict[str, list[str]] = defaultdict(list)
+    for sc in subcats:
+        first = sc.split(":", 1)[0]
+        buckets[first].append(sc)
+
+    # 2. Determine which buckets are "real" groups (2+ members).
+    multi_groups: set[str] = set()
+    for key, members in buckets.items():
+        if len(members) >= 2:
+            multi_groups.add(key)
+
+    # 3. Build sorted output: iterate bucket keys alphabetically.
+    #    For multi-child groups, emit parent first (if present) then children.
+    #    For flat/single-child, emit as-is.
+    sorted_subcats: list[str] = []
+    group_info: dict[str, tuple[str, str | None]] = {}
+
+    for key in sorted(buckets.keys()):
+        members = sorted(buckets[key])
+        if key in multi_groups:
+            # Emit the bare parent first if it exists, then children.
+            parent = [m for m in members if ":" not in m]
+            children = [m for m in members if ":" in m]
+            ordered = parent + children
+            for sc in ordered:
+                sorted_subcats.append(sc)
+                group_info[sc] = (key, key)
+        else:
+            # Single member — treat as flat.
+            for sc in members:
+                sorted_subcats.append(sc)
+                group_info[sc] = ("_flat", None)
+
+    return sorted_subcats, group_info
+
+
 @typechecked
 def create_category_timeseries(
     *,
@@ -138,6 +210,12 @@ def create_category_timeseries(
 
     # Assign a distinct colour per subcategory.
     unique_subcats = sorted(df["subcategory"].unique())
+
+    # Sort subcategories so hierarchical groups are contiguous.
+    # E.g. [ah, ah:kiosk, ah:to_go, aldi, biomarkt, decathlon:creatine]
+    # Groups with only 1 child are treated as flat (no group header).
+    unique_subcats, group_info = _sort_subcategories(unique_subcats)
+
     palette = _generate_palette(n=len(unique_subcats))
     colour_map = dict(zip(unique_subcats, palette))
     df["colour"] = df["subcategory"].map(colour_map)
@@ -161,16 +239,18 @@ def create_category_timeseries(
     dates = df["date"]
 
     # ---- Subcategory bars (legend2 = right side) ----
-    # Group by first segment of subcategory for hierarchical legend.
-    # e.g. "yearly:sports:radboud" → group "yearly", shown as "sports:radboud"
-    # Single-segment names like "rent" → group "rent", shown as "rent"
+    # group_info maps each subcat to (legendgroup, legendgrouptitle_text).
+    # - Multi-child groups: group="groceries", title="groceries" (on first)
+    # - Flat/single-child: group="_flat", title=None
     # Single-click toggles one trace, double-click toggles the group.
+    seen_groups: set[str] = set()
     for subcat in unique_subcats:
         mask = df["subcategory"] == subcat
         sub = df[mask]
-        # Determine hierarchy group (first segment) and display name.
-        parts = subcat.split(":", 1)
-        group_name = parts[0]
+        lg, lgt = group_info[subcat]
+        # Only set group title on the first trace of each group.
+        show_title = lgt if lg not in seen_groups else None
+        seen_groups.add(lg)
         fig.add_trace(
             go.Bar(
                 x=sub["date"],
@@ -180,8 +260,8 @@ def create_category_timeseries(
                 hovertext=sub["hover"],
                 hoverinfo="text",
                 legend="legend2",
-                legendgroup=group_name,
-                legendgrouptitle_text=group_name if len(parts) > 1 else None,
+                legendgroup=lg,
+                legendgrouptitle_text=show_title,
             )
         )
 
