@@ -90,6 +90,7 @@ def create_category_timeseries(
 
     Each bar represents one transaction.  Bars are coloured by direct
     subcategory.  A cumulative line is overlaid on a secondary y-axis.
+    X-axis is a linear date timeline (gaps in time show as gaps on chart).
     """
     df = _run_hledger_register(
         journal_filepath=journal_filepath,
@@ -136,13 +137,16 @@ def create_category_timeseries(
 
     fig = go.Figure()
 
+    # Use actual dates for x-axis (linear timeline).
+    dates = df["date"]
+
     # One bar trace per subcategory (for legend grouping).
     for subcat in unique_subcats:
         mask = df["subcategory"] == subcat
         sub = df[mask]
         fig.add_trace(
             go.Bar(
-                x=sub.index,
+                x=sub["date"],
                 y=sub["abs_amount"],
                 name=subcat,
                 marker_color=colour_map[subcat],
@@ -154,7 +158,7 @@ def create_category_timeseries(
     # Cumulative line on secondary y-axis.
     fig.add_trace(
         go.Scatter(
-            x=df.index,
+            x=dates,
             y=df["cumulative"],
             mode="lines",
             name="Cumulative",
@@ -166,23 +170,33 @@ def create_category_timeseries(
         )
     )
 
-    # Moving averages (weekly = 7-day, monthly = 30-day).
-    # Resample to daily totals, compute rolling mean, then map back to
-    # the transaction-based x-axis indices.
+    # Weekly and monthly totals as flat step-lines on primary y-axis.
+    # Each line is a horizontal step showing the total spent in that
+    # calendar week / month.
     daily = df.set_index("date")["abs_amount"].resample("D").sum()
-    for window, label, colour, dash_style in [
-        (7, "7-day avg", "#e377c2", "dash"),
-        (30, "30-day avg", "#17becf", "longdash"),
+    for freq, label, colour, dash_style in [
+        ("W-MON", "Weekly total", "#e377c2", "dash"),
+        ("MS", "Monthly total", "#17becf", "longdash"),
     ]:
-        if len(daily) < window:
+        period_total = daily.resample(freq).sum()
+        if period_total.empty:
             continue
-        rolling = daily.rolling(window=window, min_periods=1).mean()
-        # Map each transaction date to its rolling value.
-        ma_values = rolling.reindex(df["date"].values).values
+        # Build step coordinates: flat line from period start to next period.
+        step_x = []
+        step_y = []
+        for i, (period_start, total) in enumerate(period_total.items()):
+            if i + 1 < len(period_total):
+                period_end = period_total.index[i + 1]
+            else:
+                # Last period: extend to the last transaction date.
+                period_end = dates.iloc[-1] + pd.Timedelta(days=1)
+            step_x.extend([period_start, period_end])
+            step_y.extend([total, total])
+
         fig.add_trace(
             go.Scatter(
-                x=df.index,
-                y=ma_values,
+                x=step_x,
+                y=step_y,
                 mode="lines",
                 name=label,
                 line=dict(color=colour, width=2, dash=dash_style),
@@ -195,22 +209,25 @@ def create_category_timeseries(
             )
         )
 
-    # X-axis: show dates as tick labels (max 30 to stay readable).
+    # X-axis: linear date axis with max 30 ticks.
     max_ticks = 30
-    all_indices = list(df.index)
-    all_labels = df["date"].dt.strftime("%Y-%m-%d").tolist()
-    if len(all_indices) > max_ticks:
-        step = len(all_indices) / max_ticks
-        pick = [int(i * step) for i in range(max_ticks)]
-        tick_vals = [all_indices[i] for i in pick]
-        tick_text = [all_labels[i] for i in pick]
+    date_range = dates.iloc[-1] - dates.iloc[0]
+    n_transactions = len(dates)
+    if n_transactions > max_ticks:
+        # Pick evenly spaced dates across the range.
+        tick_dates = pd.date_range(
+            start=dates.iloc[0], end=dates.iloc[-1], periods=max_ticks
+        )
+        tick_vals = tick_dates.tolist()
+        tick_text = tick_dates.strftime("%Y-%m-%d").tolist()
     else:
-        tick_vals = all_indices
-        tick_text = all_labels
+        tick_vals = dates.tolist()
+        tick_text = dates.dt.strftime("%Y-%m-%d").tolist()
 
     fig.update_layout(
         title=f"Transactions for: {account_prefix}",
         xaxis=dict(
+            type="date",
             tickmode="array",
             tickvals=tick_vals,
             ticktext=tick_text,
