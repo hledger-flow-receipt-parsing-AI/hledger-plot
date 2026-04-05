@@ -181,17 +181,16 @@ def create_category_timeseries(
         period_total = daily.resample(freq).sum()
         if period_total.empty:
             continue
-        # Build step coordinates: flat line from period start to next period.
+        # Build disconnected horizontal segments (no vertical joins).
         step_x = []
         step_y = []
         for i, (period_start, total) in enumerate(period_total.items()):
             if i + 1 < len(period_total):
                 period_end = period_total.index[i + 1]
             else:
-                # Last period: extend to the last transaction date.
                 period_end = dates.iloc[-1] + pd.Timedelta(days=1)
-            step_x.extend([period_start, period_end])
-            step_y.extend([total, total])
+            step_x.extend([period_start, period_end, None])
+            step_y.extend([total, total, None])
 
         fig.add_trace(
             go.Scatter(
