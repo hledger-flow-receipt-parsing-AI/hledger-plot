@@ -161,9 +161,16 @@ def create_category_timeseries(
     dates = df["date"]
 
     # ---- Subcategory bars (legend2 = right side) ----
+    # Group by first segment of subcategory for hierarchical legend.
+    # e.g. "yearly:sports:radboud" → group "yearly", shown as "sports:radboud"
+    # Single-segment names like "rent" → group "rent", shown as "rent"
+    # Single-click toggles one trace, double-click toggles the group.
     for subcat in unique_subcats:
         mask = df["subcategory"] == subcat
         sub = df[mask]
+        # Determine hierarchy group (first segment) and display name.
+        parts = subcat.split(":", 1)
+        group_name = parts[0]
         fig.add_trace(
             go.Bar(
                 x=sub["date"],
@@ -173,6 +180,8 @@ def create_category_timeseries(
                 hovertext=sub["hover"],
                 hoverinfo="text",
                 legend="legend2",
+                legendgroup=group_name,
+                legendgrouptitle_text=group_name if len(parts) > 1 else None,
             )
         )
 
@@ -189,6 +198,7 @@ def create_category_timeseries(
                 display_currency + " %{y:,.2f}<extra>Cumulative</extra>"
             ),
             legend="legend",
+            legendgroup="Cumulative",
         )
     )
 
@@ -222,6 +232,8 @@ def create_category_timeseries(
                     + "</extra>"
                 ),
                 legend="legend",
+                legendgroup="Totals",
+                legendgrouptitle_text="Totals",
             )
         )
 
@@ -243,6 +255,8 @@ def create_category_timeseries(
                     + " %{y:,.2f}<extra>Monthly avg</extra>"
                 ),
                 legend="legend",
+                legendgroup="Averages",
+                legendgrouptitle_text="Averages",
             )
         )
 
@@ -264,6 +278,7 @@ def create_category_timeseries(
                     + " %{y:,.2f}<extra>Yearly monthly avg</extra>"
                 ),
                 legend="legend",
+                legendgroup="Averages",
             )
         )
 
@@ -301,6 +316,8 @@ def create_category_timeseries(
         ),
         barmode="stack",
         # Left legend: totals, averages, cumulative.
+        # groupclick="toggleitem" means single-click toggles one trace,
+        # double-click toggles entire group.
         legend=dict(
             title="Lines",
             orientation="v",
@@ -308,8 +325,11 @@ def create_category_timeseries(
             y=1,
             xanchor="right",
             x=-0.05,
+            groupclick="toggleitem",
         ),
         # Right legend: subcategories.
+        # groupclick="toggleitem" means single-click toggles one trace,
+        # double-click toggles entire group.
         legend2=dict(
             title="Categories",
             orientation="v",
@@ -317,6 +337,7 @@ def create_category_timeseries(
             y=1,
             xanchor="left",
             x=1.02,
+            groupclick="toggleitem",
         ),
         height=600,
         margin=dict(t=80, b=120, l=200, r=180),
