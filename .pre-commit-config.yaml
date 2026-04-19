@@ -1,0 +1,7 @@
+repos:
+# Check if code changes require GIF re-recording.
+ - repo: https://github.com/hledger-flow-receipt-parsing-AI/gif-staleness-hook
+   rev: v0.1.0
+   hooks:
+     - id: check-gif-staleness
+       args: [--bootstrap]
