@@ -50,6 +50,15 @@ class TimePeriod:
             " --tree --no-elide",
             "--cost --infer-value",
         ]
+        # Net worth is a position, not a flow: value what is held at the end
+        # of the period at market prices.  With --cost, a position bought in
+        # EUR and sold for USD keeps +EUR and -USD although it holds 0 BTC.
+        self.net_worth_exotic_args: List[str] = [
+            " --tree --no-elide",
+            f"--value=end,{disp_currency.value} --infer-market-prices",
+        ]
+        # Native quantities, used to split multi-currency accounts.
+        self.net_worth_raw_exotic_args: List[str] = [" --tree --no-elide"]
 
         # Explicit date range mode (used for weekly periods).
         if start_date is not None and end_date is not None:
@@ -136,6 +145,20 @@ class TimePeriod:
                 account_categories=account_categories,
                 required_exotic_args=self.raw_exotic_args,
             )
+
+    def exclusive_end_date(self) -> str:
+        """The first day after this period, as an hledger date."""
+        if self._end_date is not None:  # Weekly: already exclusive.
+            return self._end_date
+        if self.year is None:
+            raise ValueError("An all-time period has no end date.")
+        if self.month is None:  # Whole year.
+            return f"{self.year + 1}/1/1"
+        if not 1 <= self.month <= 12:
+            raise ValueError("Month must be between 1 and 12.")
+        if self.month == 12:
+            return f"{self.year + 1}/1/1"
+        return f"{self.year}/{self.month + 1}/1"
 
     def get_period(self) -> str:
         if self._period_label:
@@ -233,48 +256,19 @@ def build_hledger_command_for_period(
 # ----------------------------------------------------------------------
 # 2. Helper that only computes the *date range* (no command string)
 # ----------------------------------------------------------------------
-def _make_period_range(
-    start_year: int, start_month: int, end_year: int, end_month: int
-) -> str:
-    """Return the quoted hledger period string for a given start → end month."""
-    start_date = f"{start_year}/{start_month}/1"
-
-    next_m, next_y = end_month + 1, end_year
-    if next_m > 12:
-        next_m, next_y = 1, end_year + 1
-    end_date = f"{next_y}/{next_m}/1"
-    return f"{start_date} to {end_date}"
-
-
 def build_hledger_command_from_earliest_to_period(
     *,
     filename: str,
     account_categories: str,
-    time_period: TimePeriod,  # object with .year & .month
+    time_period: TimePeriod,
     years_and_months: Dict[int, Set[int]],
     required_exotic_args: Optional[List[str]] = None,
 ) -> str:
     """
     Build a *single* hledger command that covers the **first month present**
-    in ``years_and_months`` up to (and including) the month of ``time_period``.
+    in ``years_and_months`` up to (and including) ``time_period``, which can
+    be a month, a whole year or a week.
     """
-    # ---- validate time_period ------------------------------------------------
-    if not hasattr(time_period, "year") or not hasattr(time_period, "month"):
-        raise TypeError(
-            "`time_period` must expose `.year` and `.month` attributes."
-        )
-
-    end_year, end_month = time_period.year, time_period.month
-    if not (1 <= end_month <= 12):
-        raise ValueError("Target month must be between 1 and 12.")
-    if (
-        end_year not in years_and_months
-        or end_month not in years_and_months[end_year]
-    ):
-        raise ValueError(
-            f"Target period {end_year}/{end_month} not in journal."
-        )
-
     # ---- find earliest month ------------------------------------------------
     all_years = sorted(years_and_months.keys())
     if not all_years:
@@ -283,8 +277,9 @@ def build_hledger_command_from_earliest_to_period(
     start_year = all_years[0]
     start_month = min(years_and_months[start_year])
 
-    # ---- reuse the original date-range logic --------------------------------
-    period = _make_period_range(start_year, start_month, end_year, end_month)
+    period = (
+        f"{start_year}/{start_month}/1 to {time_period.exclusive_end_date()}"
+    )
 
     # ---- exotic args --------------------------------------------------------
     exotic = (

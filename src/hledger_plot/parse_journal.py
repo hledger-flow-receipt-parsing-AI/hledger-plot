@@ -18,6 +18,7 @@ from typeguard import typechecked
 
 from hledger_plot.time_filtering.TimePeriod import (
     TimePeriod,
+    build_hledger_command_all_time,
     build_hledger_command_from_earliest_to_period,
 )
 
@@ -52,6 +53,25 @@ def _get_rates(disp_currency: str) -> Dict[str, float]:
     return rates
 
 
+def _full_account_names(names: "pd.Series") -> List[str]:
+    """Rebuild full account names from hledger's ``--tree`` CSV rows.
+
+    hledger >= 1.50 prints each tree row as its last name segment, indented
+    two non-breaking spaces (U+00A0) per level ("assets", "  bank",
+    "    checking").  Older versions printed full names without indentation;
+    those pass through unchanged.  Relies on ``--no-elide`` so that every
+    level has its own row.
+    """
+    path: List[str] = []
+    full_names: List[str] = []
+    for raw_name in names.astype(str):
+        name = raw_name.lstrip("  ")
+        depth = (len(raw_name) - len(name)) // 2
+        path = path[:depth] + [name]
+        full_names.append(":".join(path))
+    return full_names
+
+
 def _run_hledger_to_df(
     hledger_command: str, top_level_account_categories: List[str]
 ) -> DataFrame:
@@ -63,6 +83,7 @@ def _run_hledger_to_df(
         cwd="/",
     ).stdout
     raw_df: DataFrame = pd.read_csv(StringIO(process_output), header=None)
+    raw_df[0] = _full_account_names(raw_df[0])
     return raw_df[
         raw_df[0].str.contains("|".join(top_level_account_categories))
     ].copy()
@@ -166,14 +187,25 @@ def read_balance_report(
             account_categories=time_period.account_categories,
             time_period=time_period,
             years_and_months=time_period.years_and_months,
-            required_exotic_args=time_period.required_exotic_args,
+            required_exotic_args=time_period.net_worth_exotic_args,
         )
         raw_hledger_command: str = build_hledger_command_from_earliest_to_period(
             filename=time_period.filename,
             account_categories=time_period.account_categories,
             time_period=time_period,
             years_and_months=time_period.years_and_months,
-            required_exotic_args=time_period.raw_exotic_args,
+            required_exotic_args=time_period.net_worth_raw_exotic_args,
+        )
+    elif is_net_worth:
+        hledger_command = build_hledger_command_all_time(
+            filename=time_period.filename,
+            account_categories=time_period.account_categories,
+            required_exotic_args=time_period.net_worth_exotic_args,
+        )
+        raw_hledger_command = build_hledger_command_all_time(
+            filename=time_period.filename,
+            account_categories=time_period.account_categories,
+            required_exotic_args=time_period.net_worth_raw_exotic_args,
         )
     else:
         hledger_command: str = time_period.hledger_command
