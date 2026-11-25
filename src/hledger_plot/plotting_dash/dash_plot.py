@@ -23,6 +23,7 @@ from hledger_plot.create_plots.create_timeseries_plot import (
 from hledger_plot.create_plots.helper import run_pipeline
 from hledger_plot.create_plots.Plots import ExtendedPlots
 from hledger_plot.PlotConfig import PlotConfig
+from hledger_plot.plotting_dash.port_check import dash_host_and_port
 from hledger_plot.time_filtering.get_available_periods import (
     get_years_and_months_from_hledger,
 )
@@ -591,7 +592,8 @@ def launch_dash_dashboard(
     # --------------------------------------------------------------
     # 7. Start the server
     # --------------------------------------------------------------
-    app.run(debug=True, use_reloader=False)
+    host, port = dash_host_and_port()
+    app.run(host=host, port=port, debug=True, use_reloader=False)
 
 
 # ------------------------------------------------------------------

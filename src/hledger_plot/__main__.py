@@ -15,6 +15,10 @@ from hledger_plot.create_plots.manage_plotting import export_plots
 from hledger_plot.create_plots.Plots import ExtendedPlots
 from hledger_plot.PlotConfig import PlotConfig
 from hledger_plot.plotting_dash.dash_plot import launch_dash_dashboard
+from hledger_plot.plotting_dash.port_check import (
+    dash_host_and_port,
+    ensure_port_is_free,
+)
 from hledger_plot.time_filtering.get_available_periods import (
     get_years_and_months_from_hledger,
 )
@@ -33,14 +37,21 @@ def main() -> None:
 
     plot_config: PlotConfig = PlotConfig(args=args)
     if args.journal_filepath:
+        # Support SKIP_DASH environment variable for testing
+        launch_dash: bool = (
+            os.environ.get("SKIP_DASH", "false").lower() != "true"
+        )
+        if launch_dash:
+            # Before the slow export, so a busy port is reported right away.
+            host, port = dash_host_and_port()
+            ensure_port_is_free(host=host, port=port)
 
         export_plots_for_all_times(
             args=args,
             plot_config=plot_config,
         )
 
-        # Support SKIP_DASH environment variable for testing
-        if os.environ.get("SKIP_DASH", "false").lower() != "true":
+        if launch_dash:
             launch_dash_dashboard(
                 args=args,
                 plot_config=plot_config,
