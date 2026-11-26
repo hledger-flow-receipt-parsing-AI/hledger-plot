@@ -20,8 +20,12 @@ class TimePeriod:
         period_label: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        # A view of part of the journal (hledger_plot.views): its asset
+        # balances are no positions and may well be negative.
+        partial_view: bool = False,
     ) -> None:
         self.filename: str = filename
+        self.partial_view: bool = partial_view
         self.account_categories: str = account_categories
         self.disp_currency: Currency = disp_currency
         self.month: Optional[int] = month

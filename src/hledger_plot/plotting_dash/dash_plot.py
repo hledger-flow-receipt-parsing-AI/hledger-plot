@@ -5,18 +5,37 @@
 #  "Back to Overview" button ->  return to treemaps
 #  Keyboard shortcut 'd' toggles drill-down mode.
 #  Granularity selector: Weekly / Monthly / Yearly / All Time.
+#  Top right: a tag (event, project) and who can see the transactions
+#  (both / traceable / untraceable), see hledger_plot.views.
+#  Drill-down, top right: "Stack" piles the transactions of every week or
+#  month into one column (the zoom stays).
 # --------------------------------------------------------------
 from __future__ import annotations
 
 import json
+import logging
+import os
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Optional
 
-from dash import ALL, Dash, Input, Output, State, callback_context, dcc, html
+from dash import (
+    ALL,
+    Dash,
+    Input,
+    Output,
+    State,
+    callback_context,
+    dcc,
+    html,
+    no_update,
+)
 from dash.exceptions import PreventUpdate
 from hledger_core.Currency import Currency
 from typeguard import typechecked
 
+from hledger_plot.create_plots.create_tag_cost_plot import (
+    create_tag_cost_figure,
+)
 from hledger_plot.create_plots.create_timeseries_plot import (
     create_category_timeseries,
 )
@@ -28,6 +47,17 @@ from hledger_plot.time_filtering.get_available_periods import (
     get_years_and_months_from_hledger,
 )
 from hledger_plot.time_filtering.TimePeriod import TimePeriod
+from hledger_plot.views.journal_views import (
+    BOTH,
+    TRACEABLE,
+    UNTRACEABLE,
+    JournalViews,
+    default_traceable_accounts,
+    describe_view,
+    tag_options,
+)
+
+log = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------
 # Helper: turn "Jan 2025" -> (month_int, year_int)
@@ -122,14 +152,19 @@ def _make_time_period(
     *,
     args: Any,
     plot_config: PlotConfig,
+    journal_filepath: Optional[str] = None,
 ) -> TimePeriod:
-    """Create a TimePeriod from a dropdown value string."""
+    """Create a TimePeriod from a dropdown value string, for the journal of
+    the view (the whole journal by default)."""
     account_cats = " ".join(plot_config.top_level_account_categories)
     currency = Currency(args.display_currency)
+    filename = journal_filepath or args.journal_filepath
+    partial_view = filename != args.journal_filepath
 
     if selected_period == "all_time":
         return TimePeriod(
-            filename=args.journal_filepath,
+            filename=filename,
+        partial_view=partial_view,
             account_categories=account_cats,
             disp_currency=currency,
             month=None,
@@ -142,7 +177,8 @@ def _make_time_period(
     if prefix == "m:":
         month, year = _parse_period(selected_period[2:])
         return TimePeriod(
-            filename=args.journal_filepath,
+            filename=filename,
+        partial_view=partial_view,
             account_categories=account_cats,
             disp_currency=currency,
             month=month,
@@ -153,7 +189,8 @@ def _make_time_period(
     if prefix == "y:":
         year = int(selected_period[2:])
         return TimePeriod(
-            filename=args.journal_filepath,
+            filename=filename,
+        partial_view=partial_view,
             account_categories=account_cats,
             disp_currency=currency,
             month=None,
@@ -171,7 +208,8 @@ def _make_time_period(
         end_excl = datetime(ey, em, ed) + timedelta(days=1)
         end_hledger = f"{end_excl.year}/{end_excl.month}/{end_excl.day}"
         return TimePeriod(
-            filename=args.journal_filepath,
+            filename=filename,
+        partial_view=partial_view,
             account_categories=account_cats,
             disp_currency=currency,
             month=None,
@@ -210,6 +248,22 @@ def launch_dash_dashboard(
     )
 
     all_period_options = _build_period_options(years_and_months)
+
+    # Views of the journal: traceable or not (traceability.yaml), and the
+    # transactions of one tag (tags.yaml and the journal's own tags).
+    views = JournalViews(
+        journal_filepath=args.journal_filepath,
+        cache_dir=os.path.join(
+            str(plot_config.hledger_plot_dir), "views", plot_config.journal_hash
+        ),
+        root_finance_path=plot_config.config.dir_paths.root_finance_path,
+        default_traceable=default_traceable_accounts(config=plot_config.config),
+    )
+    try:
+        tag_names = views.tag_names()
+    except (OSError, ValueError, RuntimeError) as error:
+        log.warning("Reading the tags failed: %s", error)
+        tag_names = []
 
     # --------------------------------------------------------------
     # 3. Dash layout
@@ -324,6 +378,50 @@ def launch_dash_dashboard(
                                     "alignSelf": "center",
                                 },
                             ),
+                            # Everything after this sits at the top right.
+                            html.Div(style={"flex": "1"}),
+                            html.Label(
+                                "Tag:",
+                                style={"marginRight": "6px", "fontSize": "13px"},
+                            ),
+                            dcc.Dropdown(
+                                id="tag-dropdown",
+                                options=tag_options(names=tag_names),
+                                value=None,
+                                placeholder="All transactions",
+                                clearable=True,
+                                style={"width": "220px"},
+                            ),
+                            html.Div(
+                                style={"width": "16px", "display": "inline-block"}
+                            ),
+                            html.Label(
+                                "Seen by others:",
+                                title=(
+                                    "Traceable: a bank, card issuer or exchange"
+                                    " keeps a record that links the"
+                                    " transaction to you (traceability.yaml)."
+                                ),
+                                style={"marginRight": "6px", "fontSize": "13px"},
+                            ),
+                            html.Button(
+                                "Both",
+                                id="trace-both-btn",
+                                n_clicks=0,
+                                style=_granularity_btn_active,
+                            ),
+                            html.Button(
+                                "Traceable",
+                                id="trace-yes-btn",
+                                n_clicks=0,
+                                style=_granularity_btn,
+                            ),
+                            html.Button(
+                                "Untraceable",
+                                id="trace-no-btn",
+                                n_clicks=0,
+                                style=_granularity_btn,
+                            ),
                         ],
                         style={
                             "display": "flex",
@@ -331,6 +429,16 @@ def launch_dash_dashboard(
                             "margin": "4px 20px",
                             "flexWrap": "wrap",
                             "gap": "2px",
+                        },
+                    ),
+                    # What the view leaves out (tag, traceability), if anything.
+                    html.Div(
+                        id="view-caption",
+                        children="",
+                        style={
+                            "margin": "2px 20px",
+                            "fontSize": "13px",
+                            "color": "#b35900",
                         },
                     ),
                     # Back-bar: sits inside toolbar, hidden until drill-down.
@@ -352,6 +460,36 @@ def launch_dash_dashboard(
                                     "fontWeight": "bold",
                                 },
                             ),
+                            html.Div(style={"flex": "1"}),
+                            # Top right of the drill-down: stack the
+                            # transactions of a week or month into a column.
+                            html.Button(
+                                "Stack",
+                                id="stack-btn",
+                                n_clicks=0,
+                                title=(
+                                    "Pile the transactions of every week or"
+                                    " month into one column, to hold them"
+                                    " against the average (click again to"
+                                    " go back)"
+                                ),
+                                style=_btn_inactive,
+                            ),
+                            html.Div(
+                                style={"width": "8px", "display": "inline-block"}
+                            ),
+                            html.Button(
+                                "per week",
+                                id="stack-week-btn",
+                                n_clicks=0,
+                                style=_granularity_btn,
+                            ),
+                            html.Button(
+                                "per month",
+                                id="stack-month-btn",
+                                n_clicks=0,
+                                style=_granularity_btn_active,
+                            ),
                         ],
                     ),
                 ],
@@ -369,8 +507,94 @@ def launch_dash_dashboard(
             # Store incremented by keyboard shortcut to trigger callback.
             dcc.Store(id="keyboard-drilldown-trigger", data=0),
             dcc.Store(id="keyboard-back-trigger", data=0),
+            # Who can see the transactions shown: both, traceable, untraceable.
+            dcc.Store(id="trace-store", data=BOTH),
+            # The account of the drill-down on screen ("" on the overview).
+            dcc.Store(id="drilldown-account-store", data=""),
+            dcc.Store(id="stack-store", data=False),
+            dcc.Store(id="stack-period-store", data="month"),
         ]
     )
+
+    _back_bar_shown = {
+        "display": "flex",
+        "alignItems": "center",
+        "margin": "4px 20px",
+    }
+
+    def _view_journal(traceability: Optional[str], tag: Optional[str]):
+        """The journal of the view and a caption; the whole journal and the
+        error as caption when a rules file is wrong."""
+        traceability = traceability or BOTH
+        try:
+            journal = views.journal_for(traceability=traceability, tag=tag)
+        except (OSError, ValueError) as error:
+            return args.journal_filepath, f"Rules file error, showing all: {error}"
+        return journal, describe_view(traceability=traceability, tag=tag)
+
+    def _render_overview(selected_period, traceability, tag):
+        journal, caption = _view_journal(traceability, tag)
+        try:
+            time_period = _make_time_period(
+                selected_period or "all_time",
+                args=args,
+                plot_config=plot_config,
+                journal_filepath=journal,
+            )
+            extended_plots: ExtendedPlots = run_pipeline(
+                args=args,
+                plot_config=plot_config,
+                time_period=time_period,
+            )
+        except Exception:  # an empty view or period: say so
+            log.exception("Plotting the view failed")
+            return html.Div(
+                "No transactions to show for this period and view.",
+                style={"margin": "20px"},
+            ), caption
+        tag_figure = None
+        if tag is None and tag_names:
+            try:
+                costs = views.tag_costs(
+                    traceability=traceability or BOTH,
+                    display_currency=args.display_currency,
+                )
+            except (OSError, ValueError, RuntimeError) as error:
+                log.warning("Costing the tags failed: %s", error)
+                costs = []
+            if costs:
+                tag_figure = create_tag_cost_figure(
+                    costs=costs, display_currency=args.display_currency
+                )
+        children = _render_combined(
+            extended_plots=extended_plots, tag_figure=tag_figure
+        )
+        return children, caption
+
+    def _drilldown_figure(account, traceability, tag, stack, stack_period):
+        journal, _ = _view_journal(traceability, tag)
+        return create_category_timeseries(
+            journal_filepath=journal,
+            account_prefix=account,
+            display_currency=args.display_currency,
+            stack=stack_period if stack else None,
+        )
+
+    def _render_drilldown(account, traceability, tag, stack, stack_period):
+        fig = _drilldown_figure(account, traceability, tag, stack, stack_period)
+        return html.Div(
+            [
+                dcc.Graph(
+                    id="drilldown-graph",
+                    figure=fig,
+                    style={
+                        "width": "100%",
+                        "height": "600px",
+                        "margin": "0 20px",
+                    },
+                ),
+            ]
+        )
 
     # ----------------------------------------------------------
     # Keyboard shortcuts via injected script.
@@ -453,19 +677,72 @@ def launch_dash_dashboard(
     @app.callback(
         Output("plots-container", "children"),
         Output("overview-cache", "data"),
+        Output("view-caption", "children"),
         Input("period-dropdown", "value"),
+        Input("trace-store", "data"),
+        Input("tag-dropdown", "value"),
+        # The only writer of the plot area: entering or leaving the
+        # drill-down changes this store, so a slow overview that was still
+        # being made can never cover a drill-down opened after it (Dash
+        # drops a callback's outdated answers).
+        Input("drilldown-account-store", "data"),
+        State("stack-store", "data"),
+        State("stack-period-store", "data"),
     )
-    def _update_dashboard(selected_period: str):
-        time_period = _make_time_period(
-            selected_period, args=args, plot_config=plot_config
-        )
-        extended_plots: ExtendedPlots = run_pipeline(
-            args=args,
-            plot_config=plot_config,
-            time_period=time_period,
-        )
-        children = _render_combined(extended_plots=extended_plots)
-        return children, selected_period
+    def _update_dashboard(
+        selected_period, traceability, tag, account, stack, stack_period
+    ):
+        if account:
+            # In the drill-down: show it again for the new view.
+            _, caption = _view_journal(traceability, tag)
+            drilldown = _render_drilldown(
+                account, traceability, tag, stack, stack_period
+            )
+            return drilldown, selected_period, caption
+        children, caption = _render_overview(selected_period, traceability, tag)
+        return children, selected_period, caption
+
+    # --------------------------------------------------------------
+    # 4b. Who can see the transactions: both / traceable / untraceable
+    # --------------------------------------------------------------
+    @app.callback(
+        Output("trace-store", "data"),
+        Output("trace-both-btn", "style"),
+        Output("trace-yes-btn", "style"),
+        Output("trace-no-btn", "style"),
+        Input("trace-both-btn", "n_clicks"),
+        Input("trace-yes-btn", "n_clicks"),
+        Input("trace-no-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _set_traceability(both_clicks, yes_clicks, no_clicks):
+        ctx = callback_context
+        if not ctx.triggered:
+            raise PreventUpdate
+        trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        choice = {
+            "trace-both-btn": BOTH,
+            "trace-yes-btn": TRACEABLE,
+            "trace-no-btn": UNTRACEABLE,
+        }[trigger_id]
+        styles = [
+            _granularity_btn_active if value == choice else _granularity_btn
+            for value in (BOTH, TRACEABLE, UNTRACEABLE)
+        ]
+        return (choice, *styles)
+
+    # --------------------------------------------------------------
+    # 4c. A click on a bar of "Cost per tag" shows only that tag
+    # --------------------------------------------------------------
+    @app.callback(
+        Output("tag-dropdown", "value"),
+        Input("tag-cost-graph", "clickData"),
+        prevent_initial_call=True,
+    )
+    def _pick_tag(click_data):
+        if not click_data or not click_data.get("points"):
+            raise PreventUpdate
+        return click_data["points"][0].get("y")
 
     # --------------------------------------------------------------
     # 5. Toggle drill-down mode on/off
@@ -498,22 +775,19 @@ def launch_dash_dashboard(
     #    Swaps plots-container between overview and drill-down.
     # --------------------------------------------------------------
     @app.callback(
-        Output("plots-container", "children", allow_duplicate=True),
         Output("back-bar", "style"),
         Output("drilldown-label", "children"),
         # Reset mode after drill-down.
         Output("drilldown-mode-store", "data", allow_duplicate=True),
         Output("drilldown-mode-btn", "style", allow_duplicate=True),
         Output("drilldown-hint", "children", allow_duplicate=True),
+        Output("drilldown-account-store", "data"),
         Input("back-btn", "n_clicks"),
         Input({"type": "treemap-graph", "index": ALL}, "clickData"),
         State("drilldown-mode-store", "data"),
-        State("period-dropdown", "value"),
         prevent_initial_call=True,
     )
-    def _handle_drilldown(
-        back_clicks, all_click_data, mode_json, current_period
-    ):
+    def _handle_drilldown(back_clicks, all_click_data, mode_json):
         ctx = callback_context
         if not ctx.triggered:
             raise PreventUpdate
@@ -525,20 +799,9 @@ def launch_dash_dashboard(
             "",
         )
 
-        # Back button -> re-render overview from current period.
+        # Back button -> the overview (made by _update_dashboard).
         if "back-btn" in trigger_id:
-            time_period = _make_time_period(
-                current_period or "all_time",
-                args=args,
-                plot_config=plot_config,
-            )
-            extended_plots: ExtendedPlots = run_pipeline(
-                args=args,
-                plot_config=plot_config,
-                time_period=time_period,
-            )
-            overview = _render_combined(extended_plots=extended_plots)
-            return (overview, _hidden, "", *mode_off)
+            return (_hidden, "", *mode_off, "")
 
         # A treemap was clicked — only act if drill-down mode is on.
         mode_on = json.loads(mode_json)
@@ -558,36 +821,74 @@ def launch_dash_dashboard(
         if not label:
             raise PreventUpdate
 
-        fig = create_category_timeseries(
-            journal_filepath=args.journal_filepath,
-            account_prefix=label,
-            display_currency=args.display_currency,
-        )
-
-        drilldown_view = html.Div(
-            [
-                dcc.Graph(
-                    figure=fig,
-                    style={
-                        "width": "100%",
-                        "height": "600px",
-                        "margin": "0 20px",
-                    },
-                ),
-            ]
-        )
-        back_bar_style = {
-            "display": "flex",
-            "alignItems": "center",
-            "margin": "4px 20px",
-        }
-
+        # The drill-down itself is made by _update_dashboard.
         return (
-            drilldown_view,
-            back_bar_style,
+            _back_bar_shown,
             f"Drill-down: {label}",
             *mode_off,
+            label,
         )
+
+    # --------------------------------------------------------------
+    # 6b. Stack: the transactions of a week or month in one column, and
+    #     back.  Only the figure changes, so the zoom stays.
+    # --------------------------------------------------------------
+    @app.callback(
+        Output("stack-store", "data"),
+        Output("stack-period-store", "data"),
+        Output("stack-btn", "style"),
+        Output("stack-week-btn", "style"),
+        Output("stack-month-btn", "style"),
+        Output("drilldown-graph", "figure"),
+        Input("stack-btn", "n_clicks"),
+        Input("stack-week-btn", "n_clicks"),
+        Input("stack-month-btn", "n_clicks"),
+        State("stack-store", "data"),
+        State("stack-period-store", "data"),
+        State("drilldown-account-store", "data"),
+        State("trace-store", "data"),
+        State("tag-dropdown", "value"),
+        prevent_initial_call=True,
+    )
+    def _stack(
+        stack_clicks,
+        week_clicks,
+        month_clicks,
+        stack,
+        stack_period,
+        account,
+        traceability,
+        tag,
+    ):
+        ctx = callback_context
+        if not ctx.triggered:
+            raise PreventUpdate
+        trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        if trigger_id == "stack-btn":
+            stack = not stack
+        elif trigger_id == "stack-week-btn":
+            stack, stack_period = True, "week"
+        elif trigger_id == "stack-month-btn":
+            stack, stack_period = True, "month"
+        styles = (
+            _btn_active if stack else _btn_inactive,
+            (
+                _granularity_btn_active
+                if stack_period == "week"
+                else _granularity_btn
+            ),
+            (
+                _granularity_btn_active
+                if stack_period == "month"
+                else _granularity_btn
+            ),
+        )
+        figure = (
+            _drilldown_figure(account, traceability, tag, stack, stack_period)
+            if account
+            else no_update
+        )
+        return (stack, stack_period, *styles, figure)
 
     # --------------------------------------------------------------
     # 7. Start the server
@@ -599,11 +900,28 @@ def launch_dash_dashboard(
 # ------------------------------------------------------------------
 # 8. Render overview plots
 # ------------------------------------------------------------------
-def _render_combined(extended_plots: ExtendedPlots):
+def _render_combined(extended_plots: ExtendedPlots, tag_figure: Any = None):
     if not extended_plots:
         return html.Div("No plots generated.")
 
     graphs = []
+    if tag_figure is not None:
+        # What every event/project cost; a click on a bar selects the tag.
+        graphs.append(
+            html.Div(
+                [
+                    dcc.Graph(
+                        id="tag-cost-graph",
+                        figure=tag_figure,
+                        style={
+                            "width": "100%",
+                            "height": f"{tag_figure.layout.height}px",
+                        },
+                    )
+                ],
+                style={"marginBottom": "20px"},
+            )
+        )
     for i, fig in enumerate(extended_plots.get_plots_as_list()):
         # Ensure each figure has a height
         height = fig.layout.height or 900

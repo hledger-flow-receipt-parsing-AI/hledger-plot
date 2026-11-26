@@ -19,7 +19,9 @@ def check_negative_assets(df, identifier: str, time_period: TimePeriod):
         (df[0].str.startswith(identifier)) & (df[1].astype(int) < 0)
     ]
 
-    if time_period.all_time:
+    # A view of part of the transactions (only the traceable ones, one tag)
+    # leaves out what filled an account: its balance can go below zero.
+    if time_period.all_time and not getattr(time_period, "partial_view", False):
         if not negative_assets.empty:
             problematic_assets = negative_assets[[0, 1]].values.tolist()
             # Create formatted string with name-value pairs on new lines.

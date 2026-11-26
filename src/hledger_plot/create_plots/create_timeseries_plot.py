@@ -1,6 +1,9 @@
 """Drill-down time-series plot for a single treemap category.
 
 Shows one bar per transaction and a cumulative line, all-time only.
+With *stack* ("week" or "month") the transactions of each week or month
+are stacked into one column, so they add up to that period's total and
+can be held against the weekly or monthly average.
 """
 
 from __future__ import annotations
@@ -9,7 +12,16 @@ import re
 import shlex
 import subprocess  # nosec
 from io import StringIO
-from typing import List
+from typing import List, Optional
+
+# The periods the drill-down can stack transactions per: label, the pandas
+# frequency of the period totals (weeks start on Monday) and the share of
+# the period a column covers (a little gap between columns).
+STACK_PERIODS = {
+    "week": ("Weekly", "W-MON"),
+    "month": ("Monthly", "MS"),
+}
+COLUMN_SHARE = 0.9
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -76,6 +88,51 @@ def _subcategory_label(*, account: str, prefix: str) -> str:
         remainder = account[len(prefix) + 1:]
         return remainder if remainder else account.rsplit(":", 1)[-1]
     return account.rsplit(":", 1)[-1]
+
+
+@typechecked
+def period_starts(*, dates: pd.Series, period: str) -> pd.Series:
+    """The first day of the week (Monday) or month of each date."""
+    days = dates.dt.normalize()
+    if period == "week":
+        return days - pd.to_timedelta(days.dt.weekday, unit="D")
+    if period == "month":
+        return days - pd.to_timedelta(days.dt.day - 1, unit="D")
+    raise ValueError(f"Unknown stack period: {period}")
+
+
+@typechecked
+def period_ends(*, starts: pd.Series, period: str) -> pd.Series:
+    """The first day after each week or month that starts at *starts*."""
+    if period == "week":
+        return starts + pd.Timedelta(days=7)
+    if period == "month":
+        return starts + pd.offsets.MonthBegin(1)
+    raise ValueError(f"Unknown stack period: {period}")
+
+
+@typechecked
+def period_totals(*, daily: pd.Series, frequency: str) -> pd.Series:
+    """Totals per period, each labelled with the first day of its period.
+
+    pandas labels "W-MON" weeks with the Monday that ENDS them; the
+    columns and step lines are drawn from the first day of a period, so
+    weeks are taken from Monday up to (not including) the next Monday.
+    """
+    if frequency.startswith("W-"):
+        return daily.resample(frequency, label="left", closed="left").sum()
+    return daily.resample(frequency).sum()
+
+
+@typechecked
+def stacked_columns(*, dates: pd.Series, period: str) -> tuple[list, list]:
+    """Centre (x) and width (ms) of the column each transaction is stacked
+    into: the week or month of its date."""
+    starts = period_starts(dates=dates, period=period)
+    ends = period_ends(starts=starts, period=period)
+    centres = starts + (ends - starts) / 2
+    widths = (ends - starts).dt.total_seconds() * 1000 * COLUMN_SHARE
+    return centres.tolist(), widths.tolist()
 
 
 def _build_disconnected_segments(
@@ -172,6 +229,7 @@ def create_category_timeseries(
     journal_filepath: str,
     account_prefix: str,
     display_currency: str,
+    stack: Optional[str] = None,
 ) -> Figure:
     """Build a bar + cumulative-line chart for *account_prefix* (all-time).
 
@@ -179,10 +237,16 @@ def create_category_timeseries(
     subcategory.  A cumulative line is overlaid on a secondary y-axis.
     X-axis is a linear date timeline (gaps in time show as gaps on chart).
 
+    With *stack* ("week" or "month") every transaction is a segment of the
+    column of its week or month instead, so a column adds up to that
+    period's total.  The zoom stays when *stack* changes (uirevision).
+
     Two legends:
     - Left (legend): Totals, Averages, Cumulative — each independently toggleable.
     - Right (legend2): Subcategories with hierarchical names.
     """
+    if stack is not None and stack not in STACK_PERIODS:
+        raise ValueError(f"Unknown stack period: {stack}")
     df = _run_hledger_register(
         journal_filepath=journal_filepath,
         account_prefix=account_prefix,
@@ -251,12 +315,19 @@ def create_category_timeseries(
         # Only set group title on the first trace of each group.
         show_title = lgt if lg not in seen_groups else None
         seen_groups.add(lg)
+        placement: dict = {"x": sub["date"]}
+        if stack is not None:
+            # One segment per transaction in the column of its period;
+            # bars at the same x stack, also within one trace.
+            centres, widths = stacked_columns(dates=sub["date"], period=stack)
+            placement = {"x": centres, "width": widths}
         fig.add_trace(
             go.Bar(
-                x=sub["date"],
+                **placement,
                 y=sub["abs_amount"],
                 name=subcat,
                 marker_color=colour_map[subcat],
+                marker_line=dict(width=0.5, color="white"),
                 hovertext=sub["hover"],
                 hoverinfo="text",
                 legend="legend2",
@@ -291,8 +362,11 @@ def create_category_timeseries(
         ("YS", "Yearly total", "#d62728", "dashdot"),
     ]
 
+    # Stacked per week or month, the columns are those totals; the totals
+    # of the other period would only cross them (still in the legend).
+    hidden_total = {"week": "MS", "month": "W-MON"}.get(stack or "")
     for freq, label, colour, dash_style in totals_config:
-        period_total = daily.resample(freq).sum()
+        period_total = period_totals(daily=daily, frequency=freq)
         if period_total.empty:
             continue
         step_x, step_y = _build_disconnected_segments(
@@ -314,11 +388,33 @@ def create_category_timeseries(
                 legend="legend",
                 legendgroup="Totals",
                 legendgrouptitle_text="Totals",
+                visible="legendonly" if freq == hidden_total else True,
             )
         )
 
     # ---- Averages (legend = left side) ----
-    monthly_totals = daily.resample("MS").sum()
+    monthly_totals = period_totals(daily=daily, frequency="MS")
+    weekly_totals = period_totals(daily=daily, frequency="W-MON")
+
+    # Overall weekly average: what the weekly columns are held against.
+    if len(weekly_totals) > 0:
+        weekly_avg = weekly_totals.mean()
+        fig.add_trace(
+            go.Scatter(
+                x=[dates.iloc[0], dates.iloc[-1]],
+                y=[weekly_avg, weekly_avg],
+                mode="lines",
+                name=f"Weekly avg ({display_currency} {weekly_avg:,.2f})",
+                line=dict(color="#e377c2", width=2, dash="dot"),
+                hovertemplate=(
+                    display_currency + " %{y:,.2f}<extra>Weekly avg</extra>"
+                ),
+                legend="legend",
+                legendgroup="Averages",
+                legendgrouptitle_text="Averages",
+                visible=True if stack == "week" else "legendonly",
+            )
+        )
 
     # Overall monthly average.
     if len(monthly_totals) > 0:
@@ -375,26 +471,38 @@ def create_category_timeseries(
         tick_vals = dates.tolist()
         tick_text = dates.dt.strftime("%Y-%m-%d").tolist()
 
+    title = f"Transactions for: {account_prefix}"
+    if stack is not None:
+        title += f" (stacked per {stack})"
     fig.update_layout(
-        title=f"Transactions for: {account_prefix}",
+        title=title,
+        # Plotly keeps the user's zoom while this stays the same, so
+        # stacking and unstacking keeps the zoomed-in stretch of time.
+        uirevision=account_prefix,
         xaxis=dict(
             type="date",
             tickmode="array",
             tickvals=tick_vals,
             ticktext=tick_text,
             tickangle=-45,
+            # The zoomed-in stretch of time stays when stacking toggles...
+            uirevision=account_prefix,
         ),
         yaxis=dict(
             title=f"Amount ({display_currency})",
             rangemode="tozero",
+            # ...while the heights fit the columns or bars again.
+            uirevision=f"{account_prefix}|{stack}",
         ),
         yaxis2=dict(
             title="Cumulative",
             overlaying="y",
             side="right",
             rangemode="tozero",
+            uirevision=f"{account_prefix}|{stack}",
         ),
-        barmode="stack",
+        # "relative": refunds (negative) stack below the axis in a column.
+        barmode="relative" if stack is not None else "stack",
         # Left legend: totals, averages, cumulative.
         # groupclick="toggleitem" means single-click toggles one trace,
         # double-click toggles entire group.
